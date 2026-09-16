@@ -25,6 +25,10 @@ RestartSec=30
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
+# Diqqat: ProtectSystem=strict /home ni QAMRAB OLMAYDI — u alohida
+# ProtectHome bilan boshqariladi. Ikkalasi birga bo'lgandagina xizmat
+# boshqa loyihalarga yoza olmaydi (ReadWritePaths istisno bo'lib qoladi).
+ProtectHome=read-only
 ProtectKernelTunables=true
 ProtectControlGroups=true
 ReadWritePaths=/home/azureuser/Projects/job_search_tg
