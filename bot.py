@@ -23,12 +23,14 @@ MENU = [
     [("💙 Flutter", "cat:Flutter"), ("🍏 iOS", "cat:iOS"), ("🤖 Android", "cat:Android")],
     [("⚙️ Backend", "cat:Backend"), ("🧩 Fullstack", "cat:Fullstack"), ("📱 Barcha mobile", "cat:Mobile")],
     [("🆕 Bugungi", "today"), ("🌍 Remote", "remote"), ("📋 Hammasi", "all")],
-    [("📊 Statistika", "@stats"), ("🔔 Bildirishnoma", "@notify"), ("❓ Yordam", "@help")],
+    [("📊 Statistika", "@stats"), ("🙈 Yashirilganlar", "hidden")],
+    [("🔔 Bildirishnoma", "@notify"), ("❓ Yordam", "@help")],
     [("🔄 Hozir tekshirish", "@scan"), ("📡 Kanallar", "@channels")],
 ]
 LABEL2KEY = {label: key for row in MENU for label, key in row}
 KEY2LABEL = {key: label for label, key in LABEL2KEY.items()}
 PAGE = 8
+HIDE_ROW = 4            # bitta qatorga nechta 🙈 tugmasi sig'adi
 QUERY_CACHE = 20        # har foydalanuvchiga saqlanadigan qidiruvlar soni
 BROADCAST_GAP = 0.05    # xabarlar orasidagi pauza (~20 xabar/sekund)
 
@@ -39,6 +41,9 @@ HELP = (
     "• Pastdagi menyudan yo'nalishni tanlang — vakansiyalar ro'yxati va kanaldagi post havolasi chiqadi.\n"
     "• ◀️ ▶️ tugmalari bilan sahifalarni almashtiring.\n"
     "• <b>Qidirish:</b> shunchaki so'z yozing, masalan <code>laravel remote</code> yoki <code>uzum</code>.\n"
+    "• <b>🙈 Yashirish:</b> kerak bo'lmagan vakansiya (odam olingan, mos kelmadi) "
+    "tagidagi 🙈 raqamini bosing — u boshqa ro'yxatlarda ko'rinmaydi.\n"
+    "• 🙈 Yashirilganlar — yashirganlaringiz shu yerda; ↩️ bilan qaytarasiz.\n"
     "• 🔔 — yangi vakansiyalar haqida xabar berishni yoqish/o'chirish."
 )
 
@@ -144,16 +149,55 @@ class JobBot:
 
     async def on_callback(self, event):
         uid = event.sender_id
-        data = event.data.decode()
-        if not data.startswith("p|"):
+        kind, _, rest = event.data.decode().partition("|")
+        if kind == "p":
+            flt, _, off = rest.partition("|")
+            if not await self.check_query(event, uid, flt):
+                return
+            await self.show_page(event, flt, int(off), edit=True, user_id=uid)
             await event.answer()
-            return
-        _, flt, off = data.split("|", 2)
+        elif kind == "h":
+            await self.on_hide(event, uid, rest)
+        elif kind == "u":
+            await self.on_unhide(event, uid, rest)
+        else:
+            await event.answer()
+
+    async def check_query(self, event, uid: int, flt: str) -> bool:
+        """Qidiruv tugmasi eskirgan bo'lsa (bot qayta ishga tushgan) — ogohlantiradi."""
         if flt.startswith("q:") and self.get_query(uid, flt[2:]) is None:
             await event.answer("Qidiruv eskirgan — so'zni qayta yozing.", alert=True)
+            return False
+        return True
+
+    async def on_hide(self, event, uid: int, rest: str):
+        """🙈 — vakansiyani shu foydalanuvchidan yashiradi.
+
+        rest: "<id>|<filtr>|<offset>". Filtr bo'sh bo'lsa, tugma bildirishnoma
+        xabaridan bosilgan — qayta chizadigan ro'yxat yo'q.
+        """
+        vid, flt, off = rest.split("|", 2)
+        row = self.store.vacancy(int(vid))
+        if row is None:
+            await event.answer("Vakansiya topilmadi.", alert=True)
             return
-        await self.show_page(event, flt, int(off), edit=True, user_id=uid)
-        await event.answer()
+        yangi = self.store.hide(uid, int(vid))
+        title = (row["title"] or "Vakansiya")[:60]
+        await event.answer(
+            f"🙈 Yashirildi: {title}\n«🙈 Yashirilganlar» dan qaytarasiz." if yangi
+            else f"🙈 «{title}» allaqachon yashirilgan.")
+        # Eskirgan qidiruvni qayta chiza olmaymiz, lekin yashirish baribir ishladi.
+        if flt.startswith("q:") and self.get_query(uid, flt[2:]) is None:
+            return
+        if flt:
+            await self.show_page(event, flt, int(off), edit=True, user_id=uid)
+
+    async def on_unhide(self, event, uid: int, rest: str):
+        """↩️ — yashirilgan vakansiyani ro'yxatlarga qaytaradi."""
+        vid, _, off = rest.partition("|")
+        self.store.unhide(uid, int(vid))
+        await event.answer("↩️ Qaytarildi — ro'yxatlarda yana ko'rinadi.")
+        await self.show_page(event, "hidden", int(off), edit=True, user_id=uid)
 
     # ------------------------------------------------------------------ #
     def _resolve(self, flt: str, user_id: int) -> tuple[str, str]:
@@ -165,26 +209,51 @@ class JobBot:
 
     async def show_page(self, event, flt: str, offset: int, edit: bool, user_id: int):
         db_flt, header = self._resolve(flt, user_id)
-        rows, total = self.store.query(db_flt, offset, PAGE)
-        text = self.render_page(header, rows, total, offset)
-        nav = []
-        if offset > 0:
-            nav.append(Button.inline("◀️ Oldingi", f"p|{flt}|{max(0, offset - PAGE)}"))
-        if offset + PAGE < total:
-            nav.append(Button.inline("Keyingi ▶️", f"p|{flt}|{offset + PAGE}"))
-        buttons = [nav] if nav else None
+        rows, total = self.store.query(db_flt, offset, PAGE, user_id=user_id)
+        if offset and offset >= total:      # sahifadagi oxirgi vakansiya yashirildi
+            offset = max(0, ((total - 1) // PAGE) * PAGE)
+            rows, total = self.store.query(db_flt, offset, PAGE, user_id=user_id)
+        text = self.render_page(header, rows, total, offset, hidden=flt == "hidden")
+        buttons = self.page_buttons(rows, flt, offset, total)
         if edit:
             await event.edit(text, buttons=buttons, link_preview=False)
         else:
             await event.respond(text, buttons=buttons, link_preview=False)
 
     @staticmethod
-    def render_page(header: str, rows, total: int, offset: int) -> str:
+    def page_buttons(rows, flt: str, offset: int, total: int):
+        """Har vakansiya uchun 🙈 (yoki ↩️) tugmasi + sahifalash qatori.
+
+        Tugmadagi raqam ro'yxatdagi raqam bilan bir xil — foydalanuvchi qaysi
+        vakansiyani yashirayotganini ko'rib turadi.
+        """
+        hidden = flt == "hidden"
+        marks = [
+            Button.inline(f"{'↩️' if hidden else '🙈'} {i}",
+                          f"u|{r['id']}|{offset}" if hidden else f"h|{r['id']}|{flt}|{offset}")
+            for i, r in enumerate(rows, start=offset + 1)
+        ]
+        keys = [marks[i:i + HIDE_ROW] for i in range(0, len(marks), HIDE_ROW)]
+        nav = []
+        if offset > 0:
+            nav.append(Button.inline("◀️ Oldingi", f"p|{flt}|{max(0, offset - PAGE)}"))
+        if offset + PAGE < total:
+            nav.append(Button.inline("Keyingi ▶️", f"p|{flt}|{offset + PAGE}"))
+        if nav:
+            keys.append(nav)
+        return keys or None
+
+    @staticmethod
+    def render_page(header: str, rows, total: int, offset: int, hidden: bool = False) -> str:
         e = html.escape
         if not total:
-            return f"<b>{header}</b>\n\nHozircha vakansiya yo'q. 🙂"
+            return (f"<b>{header}</b>\n\nYashirilgan vakansiya yo'q. "
+                    "Ro'yxatdagi 🙈 tugmasi bilan yashirasiz." if hidden
+                    else f"<b>{header}</b>\n\nHozircha vakansiya yo'q. 🙂")
         end = min(offset + PAGE, total)
-        out = [f"<b>{header}</b> — {total} ta vakansiya ({offset + 1}–{end})"]
+        out = [f"<b>{header}</b> — {total} ta vakansiya ({offset + 1}–{end})"
+               + ("\n<i>↩️ raqamini bossangiz, vakansiya ro'yxatlarga qaytadi.</i>"
+                  if hidden else "")]
         for i, r in enumerate(rows, start=offset + 1):
             title = e(r["title"] or "Vakansiya")
             comp = f" — {e(r['company'])}" if r["company"] else ""
@@ -213,6 +282,7 @@ class JobBot:
             f"Bugun: <b>{s['today']}</b>  |  Oxirgi 7 kun: <b>{s['week']}</b>",
             f"Kuzatilayotgan kanallar: {self.channels_count}",
             f"Bildirishnoma: {'🔔 yoqilgan' if self.store.notify_on(user_id) else '🔕 o‘chirilgan'}",
+            f"Siz yashirganlar: <b>{self.store.hidden_count(user_id)}</b>",
         ]
         if owner:
             jami, obuna = self.store.user_count()
@@ -236,9 +306,19 @@ class JobBot:
         buttons = [Button.url("🔗 Kanaldagi postni ochish", link)] if link else None
         await self._send(self.owner_id, text_html, buttons)
 
-    async def broadcast(self, text_html: str, link: str | None = None) -> int:
-        """Yangi vakansiyani barcha obunachilarga yuboradi. Yuborilganlar sonini qaytaradi."""
-        buttons = [Button.url("🔗 Kanaldagi postni ochish", link)] if link else None
+    async def broadcast(self, text_html: str, link: str | None = None,
+                        vacancy_id: int | None = None) -> int:
+        """Yangi vakansiyani barcha obunachilarga yuboradi. Yuborilganlar sonini qaytaradi.
+
+        `vacancy_id` berilsa, xabarga 🙈 tugmasi qo'shiladi — vakansiya kerak
+        bo'lmasa, foydalanuvchi uni shu yerdan yashirib qo'yadi.
+        """
+        row = []
+        if link:
+            row.append(Button.url("🔗 Kanaldagi postni ochish", link))
+        if vacancy_id:
+            row.append(Button.inline("🙈 Yashirish", f"h|{vacancy_id}||0"))
+        buttons = [row] if row else None
         yuborildi = 0
         for uid in self.store.subscribers():
             if await self._send(uid, text_html, buttons):

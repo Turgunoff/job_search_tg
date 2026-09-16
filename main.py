@@ -215,12 +215,13 @@ class App:
             return
         await self.bot.send_to_owner(text_html, link, force=force)
 
-    async def broadcast(self, text_html: str, link: str | None = None):
+    async def broadcast(self, text_html: str, link: str | None = None,
+                        vacancy_id: int | None = None):
         """Yangi vakansiya — barcha obunachilarga."""
         if not self.bot:
             log.info("BOT_TOKEN yo'q, tarqatilmadi (natijalar bazada saqlangan).")
             return
-        await self.bot.broadcast(text_html, link)
+        await self.bot.broadcast(text_html, link, vacancy_id)
 
     def write_csv(self, row: dict):
         new = not os.path.exists(self.csv_path)
@@ -273,7 +274,7 @@ class App:
         salary = str(salary) if salary else None
         company = (ai or {}).get("company")
         self.store.mark_hash(h, chat_id, msg.id, link, sent=True)
-        self.store.add_vacancy(
+        vacancy_id = self.store.add_vacancy(
             hash=h, posted=int(msg.date.timestamp()), chat_id=chat_id,
             chat_title=getattr(chat, "title", "") or "", link=link, cats=m.categories,
             levels=levels, remote=m.remote, salary=salary, title=title,
@@ -298,6 +299,7 @@ class App:
         })
         log.info("✅ Saqlandi: %s [%s] %s", link, ", ".join(m.categories), title)
         return {
+            "id": vacancy_id,
             "html": self.format_post(chat, text, link, m, ai, title),
             "link": link, "title": title, "chat": getattr(chat, "title", "") or "",
             "cats": m.categories,
@@ -403,7 +405,7 @@ class App:
     async def notify_new(self, items: list[dict]) -> None:
         if len(items) <= self.notify_max:
             for it in items:
-                await self.broadcast(it["html"], it["link"])
+                await self.broadcast(it["html"], it["link"], it.get("id"))
             return
         e = html.escape
         lines = [f"🆕 <b>{len(items)} ta yangi vakansiya</b>\n"]

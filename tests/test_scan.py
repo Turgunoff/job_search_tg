@@ -73,9 +73,9 @@ def app(monkeypatch):
         th.parse(text)                       # HTML yaroqliligini tekshiradi
         a.sent.append((text, link, force))
 
-    async def fake_broadcast(text, link=None):
+    async def fake_broadcast(text, link=None, vacancy_id=None):
         th.parse(text)
-        a.broadcasted.append((text, link))
+        a.broadcasted.append((text, link, vacancy_id))
 
     a.send = fake_send
     a.broadcast = fake_broadcast

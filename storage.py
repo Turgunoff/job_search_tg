@@ -30,6 +30,9 @@ class Storage:
             CREATE TABLE IF NOT EXISTS channels (
                 chat_id INTEGER PRIMARY KEY, title TEXT, last_msg_id INTEGER,
                 first_scan INTEGER, last_scan INTEGER);
+            CREATE TABLE IF NOT EXISTS hidden (
+                user_id INTEGER, vacancy_id INTEGER, ts INTEGER,
+                PRIMARY KEY (user_id, vacancy_id));
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT,
                 joined INTEGER, last_seen INTEGER,
@@ -63,7 +66,8 @@ class Storage:
     def add_vacancy(self, *, hash: str, posted: int, chat_id: int, chat_title: str,
                     link: str, cats: list[str], levels: list[str] | str, remote: bool,
                     salary: str | None, title: str | None, company: str | None,
-                    score: int | None, text: str) -> None:
+                    score: int | None, text: str) -> int:
+        """Vakansiyani saqlaydi va uning id sini qaytaradi (dublikatda — mavjudi)."""
         if isinstance(levels, list):
             levels = ", ".join(levels)
         self.db.execute(
@@ -76,6 +80,7 @@ class Storage:
              f"{title or ''} {company or ''} {text}".lower()),
         )
         self.db.commit()
+        return self.db.execute("SELECT id FROM vacancies WHERE hash=?", (hash,)).fetchone()[0]
 
     @staticmethod
     def _where(flt: str) -> tuple[str, list]:
@@ -97,13 +102,55 @@ class Storage:
             return " AND ".join("search LIKE ?" for _ in words), [f"%{w}%" for w in words]
         return "1=1", []
 
-    def query(self, flt: str, offset: int = 0, limit: int = 8) -> tuple[list[sqlite3.Row], int]:
+    def query(self, flt: str, offset: int = 0, limit: int = 8,
+              user_id: int | None = None) -> tuple[list[sqlite3.Row], int]:
+        """Vakansiyalar sahifasi va umumiy soni.
+
+        `user_id` berilsa, o'sha foydalanuvchi yashirgan vakansiyalar chiqmaydi.
+        `flt="hidden"` — aksincha, faqat yashirilganlar (yashirilgan vaqti bo'yicha).
+        """
+        if flt == "hidden":
+            if user_id is None:
+                return [], 0
+            total = self.db.execute(
+                "SELECT COUNT(*) FROM hidden h JOIN vacancies v ON v.id=h.vacancy_id "
+                "WHERE h.user_id=?", (user_id,)).fetchone()[0]
+            rows = self.db.execute(
+                "SELECT v.* FROM hidden h JOIN vacancies v ON v.id=h.vacancy_id "
+                "WHERE h.user_id=? ORDER BY h.ts DESC LIMIT ? OFFSET ?",
+                (user_id, limit, offset)).fetchall()
+            return rows, total
         where, params = self._where(flt)
+        if user_id is not None:
+            where += " AND id NOT IN (SELECT vacancy_id FROM hidden WHERE user_id=?)"
+            params = params + [user_id]
         total = self.db.execute(f"SELECT COUNT(*) FROM vacancies WHERE {where}", params).fetchone()[0]
         rows = self.db.execute(
             f"SELECT * FROM vacancies WHERE {where} ORDER BY posted DESC LIMIT ? OFFSET ?",
             params + [limit, offset]).fetchall()
         return rows, total
+
+    # ---------- yashirilgan vakansiyalar ----------
+    def vacancy(self, vacancy_id: int) -> sqlite3.Row | None:
+        return self.db.execute("SELECT * FROM vacancies WHERE id=?", (vacancy_id,)).fetchone()
+
+    def hide(self, user_id: int, vacancy_id: int) -> bool:
+        """Yashiradi. Yangi yashirilgan bo'lsa True, oldin ham yashirilgan bo'lsa False."""
+        cur = self.db.execute("INSERT OR IGNORE INTO hidden VALUES (?,?,?)",
+                              (user_id, vacancy_id, int(time.time())))
+        self.db.commit()
+        return cur.rowcount > 0
+
+    def unhide(self, user_id: int, vacancy_id: int) -> bool:
+        """Qaytaradi. Haqiqatan yashirilgan bo'lgan bo'lsa True."""
+        cur = self.db.execute("DELETE FROM hidden WHERE user_id=? AND vacancy_id=?",
+                              (user_id, vacancy_id))
+        self.db.commit()
+        return cur.rowcount > 0
+
+    def hidden_count(self, user_id: int) -> int:
+        return self.db.execute("SELECT COUNT(*) FROM hidden WHERE user_id=?",
+                               (user_id,)).fetchone()[0]
 
     def stats(self, days: int = 7) -> dict:
         since = int(time.time()) - days * 86400

@@ -29,11 +29,12 @@ class FakeEvent:
         self.out.append(("answer", a, kw))
 
 
-def make_app(monkeypatch):
+def make_app(monkeypatch, db="t"):
+    """Soxta bot + testga tegishli alohida baza (`db` — fayl nomi)."""
     # conftest xavfsiz qiymatlar beradi; bu testga soxta bot kerak.
     monkeypatch.setenv("BOT_TOKEN", "123:abc")
-    monkeypatch.setenv("DB_PATH", os.path.join(tmp, "t.db"))
-    monkeypatch.setenv("CSV_PATH", os.path.join(tmp, "t.csv"))
+    monkeypatch.setenv("DB_PATH", os.path.join(tmp, f"{db}.db"))
+    monkeypatch.setenv("CSV_PATH", os.path.join(tmp, f"{db}.csv"))
     monkeypatch.setenv("BOT_SESSION_NAME", os.path.join(tmp, "b"))
     app = main.App()
     app.bot.owner_id = 42
@@ -81,10 +82,14 @@ def test_full_flow(monkeypatch):
         e = FakeEvent("⚙️ Backend"); await bot.on_message(e)
         kind, text, buttons = e.out[0]
         assert "11 ta vakansiya (1–8)" in text and "https://t.me/c/222/" in text
-        assert len(buttons[0]) == 1 and buttons[0][0].type.data == b"p|cat:Backend|8"
+        # 8 ta 🙈 tugmasi (4 tadan 2 qator) + sahifalash qatori
+        assert [len(r) for r in buttons] == [4, 4, 1]
+        assert buttons[0][0].text == "🙈 1"
+        assert buttons[-1][0].type.data == b"p|cat:Backend|8"
         e2 = FakeEvent(data=b"p|cat:Backend|8"); await bot.on_callback(e2)
         assert e2.out[0][0] == "edit" and "(9–11)" in e2.out[0][1]
-        assert e2.out[0][2][0][0].type.data == b"p|cat:Backend|0"
+        assert e2.out[0][2][0][0].text == "🙈 9"     # raqamlar ro'yxatdagidek
+        assert e2.out[0][2][-1][0].type.data == b"p|cat:Backend|0"
         e3 = FakeEvent("💙 Flutter"); await bot.on_message(e3)
         assert "Flutter dasturchi (Middle)" in e3.out[0][1] and "t.me/itjobsuz/1" in e3.out[0][1]
         e4 = FakeEvent("uzum"); await bot.on_message(e4)
@@ -117,3 +122,76 @@ def test_kanal_royxati(monkeypatch):
     monkeypatch.setenv("CHANNELS", "https://t.me/itvakansiya,@uzdev_jobs, t.me/kunuz ")
     monkeypatch.setenv("EXCLUDE_CHANNELS", "@kunuz")
     assert main.App.wanted() == ["itvakansiya", "uzdev_jobs"]
+
+
+def test_yashirish(monkeypatch):
+    """🙈 — vakansiya shu foydalanuvchining ro'yxatlaridan chiqadi, boshqalarnikida qoladi."""
+    app, _ = make_app(monkeypatch, db="yashir")
+    bot = app.bot
+
+    async def go():
+        for i in range(3):
+            await app.handle(msg(200 + i, BACKEND_RU + f"\nLoyiha {i} uchun backend"), -100111)
+        e = FakeEvent("⚙️ Backend"); await bot.on_message(e)
+        birinchi = e.out[0][2][0][0].type.data.decode()   # "h|<id>|cat:Backend|0"
+        vid = int(birinchi.split("|")[1])
+        assert birinchi == f"h|{vid}|cat:Backend|0"
+
+        # 1) yashiramiz — ro'yxat darhol qayta chiziladi va vakansiya yo'qoladi
+        e2 = FakeEvent(data=birinchi.encode()); await bot.on_callback(e2)
+        turlar = [o[0] for o in e2.out]
+        assert "answer" in turlar and "edit" in turlar
+        matn = [o for o in e2.out if o[0] == "edit"][0][1]
+        assert "2 ta vakansiya" in matn
+        assert app.store.query("all", user_id=42)[1] == 2
+        assert app.store.query("all", user_id=999)[1] == 3   # boshqaga ta'sir qilmaydi
+        assert app.store.query("all")[1] == 3                # bazada turibdi
+        assert app.store.hidden_count(42) == 1
+
+        # 2) qayta bosilsa — ikkilanmaydi
+        e3 = FakeEvent(data=birinchi.encode()); await bot.on_callback(e3)
+        assert app.store.hidden_count(42) == 1
+
+        # 3) 🙈 Yashirilganlar ro'yxati — ↩️ tugmalari bilan
+        e4 = FakeEvent("🙈 Yashirilganlar"); await bot.on_message(e4)
+        kind, text, buttons = e4.out[0]
+        assert "1 ta vakansiya" in text and "↩️" in text
+        qaytar = buttons[0][0]
+        assert qaytar.text == "↩️ 1"
+        assert qaytar.type.data == f"u|{vid}|0".encode()
+
+        # 4) qaytaramiz
+        e5 = FakeEvent(data=qaytar.type.data); await bot.on_callback(e5)
+        assert app.store.hidden_count(42) == 0
+        assert app.store.query("all", user_id=42)[1] == 3
+        assert "Yashirilgan vakansiya yo'q" in [o for o in e5.out if o[0] == "edit"][0][1]
+
+        # 5) bildirishnomadagi tugma (filtrsiz) — ro'yxat chizilmaydi
+        e6 = FakeEvent(data=f"h|{vid}||0".encode()); await bot.on_callback(e6)
+        assert app.store.hidden_count(42) == 1
+        assert [o[0] for o in e6.out] == ["answer"]
+
+        # 6) o'chirilgan vakansiya id si — xato bermaydi
+        e7 = FakeEvent(data=b"h|999999|cat:Backend|0"); await bot.on_callback(e7)
+        assert [o[0] for o in e7.out] == ["answer"]
+
+    run(go())
+
+
+def test_oxirgi_sahifa_bosh_qolsa(monkeypatch):
+    """Sahifadagi yagona vakansiya yashirilsa — oldingi sahifaga tushadi."""
+    app, _ = make_app(monkeypatch, db="sahifa")
+    bot = app.bot
+
+    async def go():
+        for i in range(PAGE + 1):
+            await app.handle(msg(300 + i, BACKEND_RU + f"\nSahifa testi {i} backend"), -100111)
+        e = FakeEvent(data=f"p|all|{PAGE}".encode()); await bot.on_callback(e)
+        text = e.out[0][1]
+        assert f"({PAGE + 1}–{PAGE + 1})" in text
+        hide = e.out[0][2][0][0].type.data
+        e2 = FakeEvent(data=hide); await bot.on_callback(e2)
+        matn = [o for o in e2.out if o[0] == "edit"][0][1]
+        assert f"{PAGE} ta vakansiya (1–{PAGE})" in matn   # 1-sahifaga qaytdi
+
+    run(go())

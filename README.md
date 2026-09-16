@@ -10,7 +10,8 @@ t.me/s/<kanal> ochiq sahifalari          Sizning botingiz
   HTTP orqali o'qiladi  ──► filtr ──► baza ──► 💙 Flutter  🍏 iOS  🤖 Android
    (login kerak emas)     dublikat            ⚙️ Backend  🧩 Fullstack  📱 Barcha mobile
                           AI (ixt.)           🆕 Bugungi  🌍 Remote  📋 Hammasi
-                                              📊 Statistika  🔔 Bildirishnoma  + qidiruv
+                                              📊 Statistika  🙈 Yashirilganlar
+                                              🔔 Bildirishnoma  + qidiruv
 ```
 
 **Akkauntga kirish talab qilinmaydi.** Kanallar Telegram'ning ochiq
@@ -22,6 +23,10 @@ t.me/s/<kanal> ochiq sahifalari          Sizning botingiz
 - **Dublikatlarni olib tashlaydi.** Bitta vakansiya 5 ta kanalda chiqsa ham, bir marta saqlanadi.
 - Yo'nalish, daraja, remote va maoshni ajratadi.
 - Botda sahifalash (◀️ ▶️) va so'z bo'yicha qidiruv bor, masalan `laravel remote`.
+- **🙈 Yashirish:** kerak bo'lmagan vakansiyani (odam olingan, mos kelmadi)
+  ro'yxat tagidagi 🙈 raqamini bosib yashirasiz — u boshqa ko'rinmaydi.
+  Yashirish har foydalanuvchiga alohida; 🙈 Yashirilganlar bo'limidan ↩️ bilan
+  qaytariladi.
 - Har soatda yangi postlarni tekshiradi.
 - `.env` ga yangi kanal qo'shsangiz, 15 daqiqada o'zi ilg'aydi va uning 15 kunini ko'rib chiqadi — qayta ishga tushirish shart emas.
 - Yangi vakansiya bo'lsa, bot xabar beradi. 🔔 tugmasi bilan o'chirib qo'ysa bo'ladi.
