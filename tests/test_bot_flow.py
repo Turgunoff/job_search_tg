@@ -1,0 +1,115 @@
+import asyncio, os, sys, tempfile
+from datetime import datetime, timezone, timedelta
+from types import SimpleNamespace as NS
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+os.environ.update(API_ID="1", API_HASH="x", BOT_TOKEN="123:abc")
+tmp = tempfile.mkdtemp()
+os.environ["DB_PATH"] = os.path.join(tmp, "t.db")
+os.environ["CSV_PATH"] = os.path.join(tmp, "t.csv")
+os.environ["SESSION_NAME"] = os.path.join(tmp, "u")
+os.environ["BOT_SESSION_NAME"] = os.path.join(tmp, "b")
+
+from telethon.extensions import html as th
+import main
+from bot import JobBot, PAGE
+from test_filters import FLUTTER_UZ, BACKEND_RU, IOS_EN, RESUME
+
+
+def run(coro):
+    return asyncio.get_event_loop().run_until_complete(coro)
+
+
+class FakeEvent:
+    def __init__(self, text="", sender=42, data=None):
+        self.raw_text, self.sender_id, self.data = text, sender, data
+        self.out = []
+    async def respond(self, text, buttons=None, **kw):
+        th.parse(text); self.out.append(("respond", text, buttons))
+    async def edit(self, text, buttons=None, **kw):
+        th.parse(text); self.out.append(("edit", text, buttons))
+    async def answer(self, *a, **kw):
+        self.out.append(("answer", a, kw))
+
+
+def make_app():
+    app = main.App()
+    app.bot.owner_id = 42
+    app.bot.allowed = {42}
+    sent = []
+    async def fake_send(text, link=None, force=False):
+        th.parse(text); sent.append((text, link, force))
+    app.send = fake_send
+    ch1 = NS(title="IT Jobs UZ", username="itjobsuz", id=111)
+    ch2 = NS(title="Private", username=None, usernames=None, id=222)
+    app.entities = {-100111: ch1, -100222: ch2}
+    return app, sent
+
+
+def msg(i, t, hours_ago=0):
+    return NS(id=i, message=t, date=datetime.now(timezone.utc) - timedelta(hours=hours_ago))
+
+
+def test_full_flow():
+    app, sent = make_app()
+    async def go():
+        assert await app.handle(msg(1, FLUTTER_UZ, 30), -100111)
+        assert await app.handle(msg(2, RESUME, 30), -100111) is None
+        assert await app.handle(msg(3, FLUTTER_UZ + "\n@x #y", 29), -100222) is None  # dublikat
+        await app.handle(msg(4, BACKEND_RU, 28), -100222)
+        item = await app.handle(msg(5, IOS_EN), -100111)
+        assert item["link"] == "https://t.me/itjobsuz/5"
+        th.parse(item["html"])
+        assert sent == []  # handle o'zi hech narsa yubormaydi
+        for i in range(10):  # sahifalash uchun
+            await app.handle(msg(100 + i, BACKEND_RU + f"\nLoyiha raqami {i} uchun backend kerak"), -100222)
+    run(go())
+    rows, total = app.store.query("all")
+    assert total == 13
+    assert app.store.query("cat:Flutter")[1] == 1
+    assert app.store.query("cat:Mobile")[1] == 2          # Flutter + iOS
+    assert app.store.query("cat:Backend")[1] == 11
+    assert app.store.query("remote")[1] >= 12
+    assert app.store.query("today")[1] >= 11
+    assert app.store.query("q:laravel")[1] == 11
+    assert app.store.query("q:LARAVEL удалённо")[1] == 11  # kirill registri
+    assert app.store.query("q:uzum")[1] == 1
+
+    bot = app.bot
+    async def ui():
+        e = FakeEvent("⚙️ Backend"); await bot.on_message(e)
+        kind, text, buttons = e.out[0]
+        assert "11 ta vakansiya (1–8)" in text and "https://t.me/c/222/" in text
+        assert len(buttons[0]) == 1 and buttons[0][0].type.data == b"p|cat:Backend|8"
+        e2 = FakeEvent(data=b"p|cat:Backend|8"); await bot.on_callback(e2)
+        assert e2.out[0][0] == "edit" and "(9–11)" in e2.out[0][1]
+        assert e2.out[0][2][0][0].type.data == b"p|cat:Backend|0"
+        e3 = FakeEvent("💙 Flutter"); await bot.on_message(e3)
+        assert "Flutter dasturchi (Middle)" in e3.out[0][1] and "t.me/itjobsuz/1" in e3.out[0][1]
+        e4 = FakeEvent("uzum"); await bot.on_message(e4)
+        assert "1 ta vakansiya" in e4.out[0][1]
+        e5 = FakeEvent("📊 Statistika"); await bot.on_message(e5)
+        assert "Bazada jami: <b>13</b>" in e5.out[0][1]
+        e6 = FakeEvent("🔔 Bildirishnoma"); await bot.on_message(e6)
+        assert not bot.notify_on()
+        e7 = FakeEvent("/start", sender=999); await bot.on_message(e7)
+        assert "shaxsiy" in e7.out[0][1]
+        e8 = FakeEvent("/start"); await bot.on_message(e8)
+        assert e8.out[0][2] and app.store.get_setting("started:42") == "1"
+        e9 = FakeEvent(data=b"p|q:77|0"); await bot.on_callback(e9)
+        assert e9.out[0][0] == "answer"
+    run(ui())
+    rep = app.report([-100111, -100222], 7)
+    th.parse(rep)
+    assert "mos / jami" in rep
+
+
+def test_auto_pick():
+    D = lambda name, uname=None, ch=True, **kw: NS(
+        is_channel=ch, name=name, entity=NS(username=uname, **kw))
+    pick = main.App._auto_pick
+    assert pick(D("IT Vakansiyalar", "itvakansiya"), "auto")
+    assert not pick(D("Kun.uz", "kunuz"), "auto")
+    assert pick(D("Kun.uz", "kunuz"), "all")
+    assert not pick(D("Ishbor Toshkent", "ishbor_tashkentda", creator=True), "auto")  # o'ziniki
+    assert not pick(D("Jobs chat", ch=False), "auto")

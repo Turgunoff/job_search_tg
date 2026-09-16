@@ -1,0 +1,8 @@
+.env
+*.session
+*.session-journal
+jobs.db
+vakansiyalar.csv
+logs/
+venv/
+__pycache__/
