@@ -6,3 +6,4 @@ vakansiyalar.csv
 logs/
 venv/
 __pycache__/
+backups/

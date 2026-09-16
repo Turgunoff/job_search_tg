@@ -82,7 +82,8 @@ class App:
             require_marker=env_bool("REQUIRE_VACANCY_MARKER", True),
             exclude_levels=env_list("EXCLUDE_LEVELS"),
         )
-        self.store = Storage(os.getenv("DB_PATH", "jobs.db"))
+        self.store = Storage(os.getenv("DB_PATH", "jobs.db"),
+                             list_days=int(os.getenv("LIST_DAYS", "30")))
         self.csv_path = os.getenv("CSV_PATH", "vakansiyalar.csv")
         self.min_score = int(os.getenv("AI_MIN_SCORE", "6"))
         self.ai = None
@@ -103,28 +104,41 @@ class App:
         self.scan_interval = int(os.getenv("SCAN_INTERVAL_MIN", "60"))
         self.check_interval = int(os.getenv("CHANNEL_CHECK_MIN", "5"))
         self.notify_max = int(os.getenv("NOTIFY_MAX", "5"))
+        self.purge_days = int(os.getenv("PURGE_DAYS", "60"))
         self.owner_id = int(os.getenv("OWNER_ID", "0") or 0)
         self.peers: list[int] = []
         self.lock: asyncio.Lock | None = None
+        self.pending_refresh: asyncio.Future | None = None
         self.last_scan: datetime | None = None
         self.entities: dict[int, Channel] = {}
         self.stats: dict[int, Counter] = defaultdict(Counter)
 
     # ---------------- kanallarni aniqlash ---------------- #
     @staticmethod
-    def wanted() -> list[str]:
-        """.env dagi CHANNELS dan kuzatiladigan kanal nomlari (EXCLUDE_CHANNELS chegirilgan)."""
+    def wanted(extra: list[str] | None = None, off: list[str] | None = None) -> list[str]:
+        """Kuzatiladigan kanal nomlari.
+
+        Manbalar birlashtiriladi: `.env` dagi CHANNELS + bot orqali qo'shilganlar
+        (`extra`), ulardan EXCLUDE_CHANNELS va bot orqali o'chirilganlar (`off`)
+        chegiriladi.
+        """
         skip = {tme_web.normalize(c).lower() for c in env_list("EXCLUDE_CHANNELS")}
+        skip |= {tme_web.normalize(c).lower() for c in (off or [])}
         names: list[str] = []
-        for raw in env_list("CHANNELS"):
+        for raw in env_list("CHANNELS") + list(extra or []):
             name = tme_web.normalize(raw)
             if name and name.lower() not in skip and name not in names:
                 names.append(name)
         return names
 
+    def wanted_now(self) -> list[str]:
+        """Joriy ro'yxat: .env + bazadagi qo'shimchalar."""
+        return self.wanted(self.store.get_list("extra_channels"),
+                           self.store.get_list("off_channels"))
+
     async def compute_peers(self, strict: bool = True) -> list[int]:
         """Kanal ro'yxatini o'qiydi va har birining ochiqligini tekshiradi."""
-        names = self.wanted()
+        names = self.wanted_now()
         if not names and strict:
             sys.exit("❌ .env da CHANNELS bo'sh. Kuzatiladigan kanallarni vergul bilan "
                      "yozing, masalan: CHANNELS=@dartuz_jobs,@progjob")
@@ -146,7 +160,7 @@ class App:
 
     async def list_all(self):
         """Sozlangan kanallarni tekshirib, ochiq/yopiqligini ko'rsatadi."""
-        names = self.wanted()
+        names = self.wanted_now()
         if not names:
             print("\n❌ .env da CHANNELS bo'sh.\n"
                   "   Masalan: CHANNELS=@dartuz_jobs,@progjob,@uzdev_jobs")
@@ -215,13 +229,12 @@ class App:
             return
         await self.bot.send_to_owner(text_html, link, force=force)
 
-    async def broadcast(self, text_html: str, link: str | None = None,
-                        vacancy_id: int | None = None):
-        """Yangi vakansiya — barcha obunachilarga."""
+    async def notify_new(self, items: list[dict]) -> None:
+        """Yangi vakansiyalar — har kimga o'z sozlamasiga qarab."""
         if not self.bot:
             log.info("BOT_TOKEN yo'q, tarqatilmadi (natijalar bazada saqlangan).")
             return
-        await self.bot.broadcast(text_html, link, vacancy_id)
+        await self.bot.deliver_new(items, self.notify_max)
 
     def write_csv(self, row: dict):
         new = not os.path.exists(self.csv_path)
@@ -302,7 +315,10 @@ class App:
             "id": vacancy_id,
             "html": self.format_post(chat, text, link, m, ai, title),
             "link": link, "title": title, "chat": getattr(chat, "title", "") or "",
-            "cats": m.categories,
+            "cats": m.categories, "remote": m.remote,
+            "score": (ai or {}).get("score"),
+            # Qidiruv obunalari shu matn bo'yicha tekshiriladi (bazadagi `search`).
+            "search": f"{title} {company or ''} {text}".lower(),
         }
 
     async def scan_channel(self, pid: int) -> tuple[list[dict], bool]:
@@ -402,20 +418,6 @@ class App:
                 elif new:
                     await self.notify_new(new)
 
-    async def notify_new(self, items: list[dict]) -> None:
-        if len(items) <= self.notify_max:
-            for it in items:
-                await self.broadcast(it["html"], it["link"], it.get("id"))
-            return
-        e = html.escape
-        lines = [f"🆕 <b>{len(items)} ta yangi vakansiya</b>\n"]
-        for it in items[:15]:
-            lines.append(f"• <a href=\"{e(it['link'])}\">{e(it['title'])}</a> — {e(it['chat'])}")
-        if len(items) > 15:
-            lines.append(f"… va yana {len(items) - 15} ta")
-        lines.append("\nBarchasi menyuda: 🆕 Bugungi / 📋 Hammasi 👇")
-        await self.broadcast("\n".join(lines))
-
     async def loop_every(self, minutes: int, fn) -> None:
         while True:
             await asyncio.sleep(minutes * 60)
@@ -432,6 +434,49 @@ class App:
         n = await self.scan_all()
         return (f"✅ Tekshiruv tugadi. Yangi vakansiyalar: <b>{n}</b>\n"
                 f"Keyingi avtomatik tekshiruv {self.scan_interval} daqiqadan so'ng.")
+
+    async def bot_edit_channel(self, name: str, add: bool) -> str:
+        """Admin qo'shgan/o'chirgan kanal. Ro'yxat bazada saqlanadi.
+
+        `.env` dagi CHANNELS ga tegilmaydi — u qo'lda boshqariladigan manba
+        bo'lib qolaveradi, bot faqat o'z qo'shimchalarini yozadi.
+        """
+        e = html.escape
+        name = tme_web.normalize(name)
+        if not name:
+            return "❌ Kanal nomi tushunarsiz. Masalan: <code>+@dartuz_jobs</code>"
+        if add:
+            opened, title, count = await tme_web.probe(name)
+            if not opened:
+                return (f"❌ <b>@{e(name)}</b> o'qilmadi: {e(title)}\n\n"
+                        "Kanal egasi ochiq ko'rinishni (preview) o'chirgan bo'lishi "
+                        "mumkin. Brauzerda <code>t.me/s/" + e(name) + "</code> ochilsa — ishlaydi.")
+            self.store.remove_from_list("off_channels", name)
+            if not self.store.add_to_list("extra_channels", name) and \
+                    tme_web.chat_id_for(name) in self.peers:
+                return f"ℹ️ <b>{e(title)}</b> allaqachon kuzatilmoqda."
+            self.schedule_refresh()
+            return (f"✅ Qo'shildi: <b>{e(title)}</b> ({count} ta post ko'rindi)\n"
+                    f"Oxirgi {self.backfill_days} kun tekshirilmoqda — natija tayyor "
+                    "bo'lgach xabar beraman.")
+        # o'chirish
+        entity = self.entities.get(tme_web.chat_id_for(name))
+        sarlavha = getattr(entity, "title", None) or f"@{name}"
+        self.store.remove_from_list("extra_channels", name)
+        self.store.add_to_list("off_channels", name)
+        self.schedule_refresh()
+        return (f"➖ Kuzatuvdan chiqarildi: <b>{e(str(sarlavha))}</b>\n"
+                "<i>Undan yig'ilgan vakansiyalar bazada qoladi.</i>")
+
+    def schedule_refresh(self) -> None:
+        """Kanal ro'yxatini fonda yangilaydi (15 kunlik skan uzoq davom etishi mumkin)."""
+        self.pending_refresh = asyncio.ensure_future(self.refresh_channels())
+
+    async def purge_old(self) -> None:
+        """Eski xizmat yozuvlari (ko'rilgan postlar, xeshlar) — kuniga bir marta."""
+        n = self.store.purge(self.purge_days)
+        if n:
+            log.info("Tozalandi: %d ta eski yozuv (%d kundan eski)", n, self.purge_days)
 
     def bot_channels(self) -> str:
         e = html.escape
@@ -487,7 +532,10 @@ class App:
                 sys.exit("❌ .env da OWNER_ID yo'q. Botdan kim foydalanishini bilish uchun "
                          "Telegram user ID ingizni yozing (@userinfobot ko'rsatadi).")
             await self.bot.start(owner_id=self.owner_id)
-            if self.owner_id not in self.store.subscribers():
+            if not self.store.notify_on(self.owner_id):
+                log.info("Admin bildirishnomasi o'chirilgan — texnik hisobotlar "
+                         "yuborilmaydi (🔔 Sozlamalar dan yoqiladi).")
+            elif self.owner_id not in self.store.subscribers():
                 log.warning("👉 Telegramda @%s botini oching va /start bosing — "
                             "aks holda bot sizga yoza olmaydi.", self.bot.username)
         else:
@@ -503,6 +551,7 @@ class App:
             self.bot.channels_count = len(self.peers)
             self.bot.scan_callback = self.bot_scan
             self.bot.channels_callback = self.bot_channels
+            self.bot.channel_edit_callback = self.bot_edit_channel
 
         await self.scan_all()
         if args.once:
@@ -510,6 +559,7 @@ class App:
 
         asyncio.ensure_future(self.loop_every(self.scan_interval, self.scan_all))
         asyncio.ensure_future(self.loop_every(self.check_interval, self.refresh_channels))
+        asyncio.ensure_future(self.loop_every(24 * 60, self.purge_old))
         log.info("👀 Ishlayapti: har %d daqiqada yangi postlar, har %d daqiqada .env dagi "
                  "kanallar ro'yxati tekshiriladi. To'xtatish: Ctrl+C",
                  self.scan_interval, self.check_interval)

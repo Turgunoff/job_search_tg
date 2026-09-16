@@ -67,18 +67,19 @@ def app(monkeypatch):
     a = main.App()
     a.tme = fake
     a.sent = []           # egaga ketgan xabarlar (hisobotlar)
-    a.broadcasted = []    # obunachilarga tarqatilgan vakansiyalar
+    a.notified = []       # tarqatishga berilgan vakansiya to'plamlari
 
     async def fake_send(text, link=None, force=False):
         th.parse(text)                       # HTML yaroqliligini tekshiradi
         a.sent.append((text, link, force))
 
-    async def fake_broadcast(text, link=None, vacancy_id=None):
-        th.parse(text)
-        a.broadcasted.append((text, link, vacancy_id))
+    async def fake_notify(items):
+        for it in items:
+            th.parse(it["html"])
+        a.notified.append(items)
 
     a.send = fake_send
-    a.broadcast = fake_broadcast
+    a.notify_new = fake_notify
     a.lock = asyncio.Lock()
     return a
 
@@ -114,7 +115,7 @@ def test_backfill_hourly_and_new_channel(app, monkeypatch):
         # 2) soatlik skan: yangi post yo'q -> hech narsa
         app.sent.clear()
         assert await app.scan_all() == 0
-        assert app.sent == [] and app.broadcasted == []
+        assert app.sent == [] and app.notified == []
         assert app.tme.calls[-1] == ("itvak", 4, False)   # faqat min_id dan keyingilari
 
         # 3) yangi post + boshqa kanalning dublikati
@@ -122,13 +123,13 @@ def test_backfill_hourly_and_new_channel(app, monkeypatch):
                                    m(6, BACKEND_RU + "\n@boshqa", 0)]   # 6 = dublikat
         assert await app.scan_all() == 1
         # yangi vakansiya endi barcha obunachilarga tarqatiladi, egaga alohida emas
-        assert len(app.broadcasted) == 1
-        assert app.broadcasted[0][1] == "https://t.me/itvak/5"
+        assert len(app.notified) == 1 and len(app.notified[0]) == 1
+        assert app.notified[0][0]["link"] == "https://t.me/itvak/5"
         assert app.sent == []
 
         # 4) .env ga yangi kanal qo'shildi -> darhol 15 kunlik skan
         app.sent.clear()
-        app.broadcasted.clear()
+        app.notified.clear()
         app.tme.add_channel("remotejobsuz", "Remote Jobs UZ", [
             m(10, IOS_EN, 3),                                  # dublikat (itvak da bor)
             m(11, "#vakansiya\nAndroid dasturchi (Kotlin) kerak\nMaosh: 2000$", 7),
@@ -144,10 +145,10 @@ def test_backfill_hourly_and_new_channel(app, monkeypatch):
 
         # 5) qayta tekshirish — hech narsa takrorlanmaydi
         app.sent.clear()
-        app.broadcasted.clear()
+        app.notified.clear()
         await app.refresh_channels()
         assert await app.scan_all() == 0
-        assert app.sent == [] and app.broadcasted == []
+        assert app.sent == [] and app.notified == []
         assert app.store.query("all")[1] == 4
 
         # 6) ko'p yangi vakansiya -> bitta umumiy xabar
@@ -156,8 +157,7 @@ def test_backfill_hourly_and_new_channel(app, monkeypatch):
                        f"Maosh kelishiladi", 0)
             for i in range(8)]
         assert await app.scan_all() == 8
-        assert len(app.broadcasted) == 1
-        assert "8 ta yangi vakansiya" in app.broadcasted[0][0]
+        assert len(app.notified) == 1 and len(app.notified[0]) == 8
 
         # 7) bot uchun matnlar
         th.parse(app.bot_channels())

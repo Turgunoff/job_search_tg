@@ -10,8 +10,8 @@ t.me/s/<kanal> ochiq sahifalari          Sizning botingiz
   HTTP orqali o'qiladi  ──► filtr ──► baza ──► 💙 Flutter  🍏 iOS  🤖 Android
    (login kerak emas)     dublikat            ⚙️ Backend  🧩 Fullstack  📱 Barcha mobile
                           AI (ixt.)           🆕 Bugungi  🌍 Remote  📋 Hammasi
-                                              📊 Statistika  🙈 Yashirilganlar
-                                              🔔 Bildirishnoma  + qidiruv
+                                              📌 Mening  🔔 Sozlamalar
+                                              + qidiruv va obunalar
 ```
 
 **Akkauntga kirish talab qilinmaydi.** Kanallar Telegram'ning ochiq
@@ -23,12 +23,22 @@ t.me/s/<kanal> ochiq sahifalari          Sizning botingiz
 - **Dublikatlarni olib tashlaydi.** Bitta vakansiya 5 ta kanalda chiqsa ham, bir marta saqlanadi.
 - Yo'nalish, daraja, remote va maoshni ajratadi.
 - Botda sahifalash (◀️ ▶️) va so'z bo'yicha qidiruv bor, masalan `laravel remote`.
-- **🙈 Yashirish:** kerak bo'lmagan vakansiyani (odam olingan, mos kelmadi)
-  ro'yxat tagidagi 🙈 raqamini bosib yashirasiz — u boshqa ko'rinmaydi.
-  Yashirish har foydalanuvchiga alohida; 🙈 Yashirilganlar bo'limidan ↩️ bilan
-  qaytariladi.
+- **Belgilar:** ro'yxat tagidagi raqam tugmalari bilan vakansiyani 🙈 yashirasiz
+  (odam olingan, mos kelmadi), ⭐ saqlaysiz yoki ✅ ariza berganingizni
+  belgilaysiz. Hammasi **📌 Mening** bo'limida to'planadi, belgilar har
+  foydalanuvchiga alohida.
+- **Shaxsiy bildirishnoma:** **🔔 Sozlamalar** dan qaysi yo'nalishlar bo'yicha
+  xabar kelishini tanlaysiz — keraksizi umuman kelmaydi. Faqat remote va
+  minimal AI ball chegarasini ham qo'yish mumkin.
+- **Qidiruv obunasi:** so'zni qidirib, natija ostidagi «🔔 Obuna» ni bossangiz —
+  o'sha so'zga mos yangi vakansiya chiqishi bilan xabar keladi.
+- **📦 Arxiv:** ro'yxatlar oxirgi 30 kunni ko'rsatadi (`LIST_DAYS`), eskisi
+  arxivda qoladi — ro'yxat allaqachon yopilgan vakansiyalar bilan to'lib
+  ketmaydi.
 - Har soatda yangi postlarni tekshiradi.
 - `.env` ga yangi kanal qo'shsangiz, 15 daqiqada o'zi ilg'aydi va uning 15 kunini ko'rib chiqadi — qayta ishga tushirish shart emas.
+- **Kanalni botdan turib boshqarish:** admin `+@kanal_nomi` deb yozsa kanal
+  qo'shiladi (avval o'qilishi tekshiriladi), `-@kanal_nomi` — chiqariladi.
 - Yangi vakansiya bo'lsa, bot xabar beradi. 🔔 tugmasi bilan o'chirib qo'ysa bo'ladi.
 - Bot hammaga ochiq: kim `/start` bossa vakansiyalarni ko'radi va xabar oladi. 🔔 sozlamasi har foydalanuvchiga alohida.
 - Topilgan hamma vakansiyalar `vakansiyalar.csv` fayliga ham yoziladi.
@@ -195,6 +205,37 @@ Testlar: `pip install pytest && pytest -q tests`
 
 ---
 
+## Baza zaxirasi
+
+`jobs.db` — yig'ilgan hamma vakansiya, foydalanuvchilar va ularning belgilari.
+Fayl buzilsa yoki server yo'qolsa, hammasi ketadi. Kunlik zaxira uchun:
+
+```bash
+sudo apt install sqlite3          # bir marta
+chmod +x scripts/backup.sh
+crontab -e
+# quyidagini qo'shing (har kuni soat 3:00 da):
+0 3 * * * /home/azureuser/Projects/job_search_tg/scripts/backup.sh
+```
+
+Nusxalar `backups/` papkasiga `jobs-2026-09-16-0300.db.gz` ko'rinishida tushadi,
+oxirgi 14 tasi saqlanadi (`BACKUP_KEEP`). Skript `sqlite3 .backup` dan
+foydalanadi — bot ishlab turganda ham xavfsiz (oddiy `cp` yozuv o'rtasida
+buzilgan fayl berishi mumkin).
+
+Tiklash: `gunzip -c backups/jobs-....db.gz > jobs.db` va servisni qayta ishga
+tushiring.
+
+## Testlar
+
+```bash
+pip install pytest
+python -m pytest tests/ -q
+```
+
+Har `git push` da GitHub Actions ham shu testlarni ishga tushiradi
+(`.github/workflows/tests.yml`).
+
 ## Loyiha tuzilishi
 
 | Fayl | Vazifasi |
@@ -205,6 +246,8 @@ Testlar: `pip install pytest && pytest -q tests`
 | `ai.py` | Ixtiyoriy AI baholash (OpenAI-mos endpoint) |
 | `bot.py` | Telegram bot menyusi, sahifalash, qidiruv |
 | `main.py` | Hammasini bog'laydi: skan jadvali, xabarlar, hisobot |
+| `scripts/backup.sh` | `jobs.db` ning kunlik zaxirasi (cron uchun) |
+| `.github/workflows/tests.yml` | Har push da testlarni ishga tushiradi |
 
 > Ilgari kanallar userbot (akkauntga kirish) orqali o'qilardi. U variant git
 > tarixida saqlangan — `git log` dagi birinchi commit.
