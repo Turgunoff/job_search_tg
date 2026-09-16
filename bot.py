@@ -1,16 +1,19 @@
-"""Menyuli Telegram bot: saralangan vakansiyalarni yo'nalish bo'yicha ko'rsatadi.
+"""Menyuli Telegram bot: saralangan IT vakansiyalarni yo'nalish bo'yicha ko'rsatadi.
 
-Bot faqat egasiga (skript ulangan akkaunt) va ALLOWED_USERS dagilarga javob beradi.
+Bot hammaga ochiq — kim /start bossa foydalana oladi. OWNER_ID esa admin
+huquqlariga ega: 🔄 qayta tekshirish, 📡 kanallar ro'yxati va texnik hisobotlar.
 """
 from __future__ import annotations
 
 import asyncio
 import html
 import logging
+from collections import OrderedDict, defaultdict
 from datetime import datetime
 
 from telethon import Button, TelegramClient, events
-from telethon.errors import FloodWaitError
+from telethon.errors import (FloodWaitError, InputUserDeactivatedError,
+                             UserIsBlockedError)
 
 from storage import Storage
 
@@ -26,17 +29,17 @@ MENU = [
 LABEL2KEY = {label: key for row in MENU for label, key in row}
 KEY2LABEL = {key: label for label, key in LABEL2KEY.items()}
 PAGE = 8
+QUERY_CACHE = 20        # har foydalanuvchiga saqlanadigan qidiruvlar soni
+BROADCAST_GAP = 0.05    # xabarlar orasidagi pauza (~20 xabar/sekund)
 
 HELP = (
     "<b>Qanday ishlaydi</b>\n"
-    "Skript IT kanallaringizni kuzatadi va sizga mos vakansiyalarni shu botga yig'adi.\n"
-    "• Yangi kanal — oxirgi 15 kun tekshiriladi, keyin har soatda faqat yangi postlar.\n"
-    "• Yangi kanalga qo'shilsangiz — bir necha daqiqada o'zi topib, 15 kunini tekshiradi.\n\n"
+    "Bot IT kanallarni kuzatadi va saralangan vakansiyalarni shu yerga yig'adi.\n"
+    "• Har soatda yangi postlar tekshiriladi.\n\n"
     "• Pastdagi menyudan yo'nalishni tanlang — vakansiyalar ro'yxati va kanaldagi post havolasi chiqadi.\n"
     "• ◀️ ▶️ tugmalari bilan sahifalarni almashtiring.\n"
     "• <b>Qidirish:</b> shunchaki so'z yozing, masalan <code>laravel remote</code> yoki <code>uzum</code>.\n"
-    "• 🔔 — yangi vakansiyalar haqida xabar berishni yoqish/o'chirish.\n"
-    "• 🔄 — soatni kutmasdan hozir tekshirish.  📡 — kuzatilayotgan kanallar."
+    "• 🔔 — yangi vakansiyalar haqida xabar berishni yoqish/o'chirish."
 )
 
 
@@ -46,57 +49,76 @@ class JobBot:
         self.store = store
         self.token = token
         self.client = TelegramClient(session, api_id, api_hash)
-        self.allowed: set[int] = set()
         self.owner_id: int | None = None
-        self.queries: dict[str, str] = {}
+        # Har foydalanuvchining oxirgi qidiruvlari — sahifalash tugmalari uchun.
+        # Foydalanuvchi bo'yicha ajratilgan va chegaralangan: xotira cheksiz o'smaydi.
+        self.queries: dict[int, OrderedDict] = defaultdict(OrderedDict)
+        self.query_seq: dict[int, int] = defaultdict(int)
         self.channels_count = 0
         self.username = ""
         # App tomonidan ulanadi:
         self.scan_callback = None       # async () -> str
         self.channels_callback = None   # () -> str
 
-    async def start(self, owner_id: int, extra_allowed: list[int]):
+    async def start(self, owner_id: int):
         await self.client.start(bot_token=self.token)
         self.client.parse_mode = "html"
         self.owner_id = owner_id
-        self.allowed = {owner_id, *extra_allowed}
         self.client.add_event_handler(
             self.on_message, events.NewMessage(incoming=True, func=lambda e: e.is_private))
         self.client.add_event_handler(self.on_callback, events.CallbackQuery())
         me = await self.client.get_me()
         self.username = me.username or ""
-        log.info("Bot ishga tushdi: @%s", self.username)
+        log.info("Bot ishga tushdi: @%s (ochiq, admin=%s)", self.username, owner_id)
+
+    def is_owner(self, user_id: int) -> bool:
+        return bool(self.owner_id) and user_id == self.owner_id
+
+    def remember_query(self, user_id: int, text: str) -> str:
+        self.query_seq[user_id] += 1
+        qid = str(self.query_seq[user_id])
+        cache = self.queries[user_id]
+        cache[qid] = text[:100]
+        while len(cache) > QUERY_CACHE:
+            cache.popitem(last=False)
+        return qid
+
+    def get_query(self, user_id: int, qid: str) -> str | None:
+        return self.queries[user_id].get(qid)
 
     # ------------------------------------------------------------------ #
     @staticmethod
-    def keyboard():
+    def keyboard(owner: bool = False):
+        """Oddiy foydalanuvchiga admin qatori (🔄, 📡) ko'rsatilmaydi."""
+        rows = MENU if owner else MENU[:-1]
         return [[Button.text(label, resize=True, persistent=True) for label, _ in row]
-                for row in MENU]
-
-    def notify_on(self) -> bool:
-        return self.store.get_setting("notify", "1") == "1"
+                for row in rows]
 
     async def on_message(self, event):
-        if event.sender_id not in self.allowed:
-            await event.respond("⛔ Bu shaxsiy bot.")
-            return
+        uid = event.sender_id
+        sender = await event.get_sender()
+        self.store.add_user(uid, getattr(sender, "username", None),
+                            getattr(sender, "first_name", None))
+        owner = self.is_owner(uid)
         text = (event.raw_text or "").strip()
         if text in ("/start", "/menu"):
-            self.store.set_setting(f"started:{event.sender_id}", "1")
             await event.respond(
                 "👋 Salom! Saralangan IT vakansiyalar shu yerda.\n"
                 "Pastdagi menyudan yo'nalishni tanlang.\n\n" + HELP,
-                buttons=self.keyboard())
+                buttons=self.keyboard(owner))
             return
         if text == "/help":
-            await event.respond(HELP, buttons=self.keyboard())
+            await event.respond(HELP, buttons=self.keyboard(owner))
             return
         key = LABEL2KEY.get(text)
+        if key in ("@scan", "@channels") and not owner:
+            await event.respond("Bu tugma faqat admin uchun.", buttons=self.keyboard(owner))
+            return
         if key == "@stats":
-            await event.respond(self.render_stats())
+            await event.respond(self.render_stats(uid, owner))
         elif key == "@notify":
-            new = "0" if self.notify_on() else "1"
-            self.store.set_setting("notify", new)
+            new = "0" if self.store.notify_on(uid) else "1"
+            self.store.set_notify(uid, new == "1")
             await event.respond("🔔 Bildirishnoma yoqildi: yangi vakansiyalar darhol keladi."
                                 if new == "1" else
                                 "🔕 Bildirishnoma o'chirildi. Vakansiyalar menyuda saqlanib boradi.")
@@ -112,39 +134,37 @@ class JobBot:
             await event.respond(self.channels_callback() if self.channels_callback
                                 else "Ma'lumot yo'q.")
         elif key:
-            await self.show_page(event, key, 0, edit=False)
+            await self.show_page(event, key, 0, edit=False, user_id=uid)
         elif text.startswith("/"):
-            await event.respond("Noma'lum buyruq. /menu ni bosing.", buttons=self.keyboard())
+            await event.respond("Noma'lum buyruq. /menu ni bosing.",
+                                buttons=self.keyboard(owner))
         elif len(text) >= 2:
-            qid = str(len(self.queries) + 1)
-            self.queries[qid] = text[:100]
-            await self.show_page(event, f"q:{qid}", 0, edit=False)
+            qid = self.remember_query(uid, text)
+            await self.show_page(event, f"q:{qid}", 0, edit=False, user_id=uid)
 
     async def on_callback(self, event):
-        if event.sender_id not in self.allowed:
-            await event.answer("⛔")
-            return
+        uid = event.sender_id
         data = event.data.decode()
         if not data.startswith("p|"):
             await event.answer()
             return
         _, flt, off = data.split("|", 2)
-        if flt.startswith("q:") and flt[2:] not in self.queries:
+        if flt.startswith("q:") and self.get_query(uid, flt[2:]) is None:
             await event.answer("Qidiruv eskirgan — so'zni qayta yozing.", alert=True)
             return
-        await self.show_page(event, flt, int(off), edit=True)
+        await self.show_page(event, flt, int(off), edit=True, user_id=uid)
         await event.answer()
 
     # ------------------------------------------------------------------ #
-    def _resolve(self, flt: str) -> tuple[str, str]:
+    def _resolve(self, flt: str, user_id: int) -> tuple[str, str]:
         """(bazaga beriladigan filtr, sarlavha)"""
         if flt.startswith("q:"):
-            q = self.queries.get(flt[2:], "")
+            q = self.get_query(user_id, flt[2:]) or ""
             return f"q:{q}", f"🔎 «{html.escape(q)}»"
         return flt, KEY2LABEL.get(flt, "📋 Hammasi")
 
-    async def show_page(self, event, flt: str, offset: int, edit: bool):
-        db_flt, header = self._resolve(flt)
+    async def show_page(self, event, flt: str, offset: int, edit: bool, user_id: int):
+        db_flt, header = self._resolve(flt, user_id)
         rows, total = self.store.query(db_flt, offset, PAGE)
         text = self.render_page(header, rows, total, offset)
         nav = []
@@ -184,7 +204,7 @@ class JobBot:
             out.append("\n".join(block))
         return "\n".join(out)  # 8 ta qisqa blok — 4096 belgi limitidan ancha kam
 
-    def render_stats(self) -> str:
+    def render_stats(self, user_id: int, owner: bool = False) -> str:
         s = self.store.stats(7)
         e = html.escape
         lines = [
@@ -192,8 +212,11 @@ class JobBot:
             f"Bazada jami: <b>{s['total']}</b>",
             f"Bugun: <b>{s['today']}</b>  |  Oxirgi 7 kun: <b>{s['week']}</b>",
             f"Kuzatilayotgan kanallar: {self.channels_count}",
-            f"Bildirishnoma: {'🔔 yoqilgan' if self.notify_on() else '🔕 o‘chirilgan'}",
+            f"Bildirishnoma: {'🔔 yoqilgan' if self.store.notify_on(user_id) else '🔕 o‘chirilgan'}",
         ]
+        if owner:
+            jami, obuna = self.store.user_count()
+            lines.append(f"Foydalanuvchilar: <b>{jami}</b>  |  obunachilar: <b>{obuna}</b>")
         if s["cats"]:
             lines.append("\n<b>Yo'nalishlar (7 kun):</b>")
             lines += [f"• {e(k)}: {v}" for k, v in s["cats"].items()]
@@ -203,35 +226,45 @@ class JobBot:
         return "\n".join(lines)
 
     # ------------------------------------------------------------------ #
-    def recipients(self) -> list[int]:
-        """Egasi + /start bosgan ruxsatli foydalanuvchilar."""
-        out = [self.owner_id] if self.owner_id else []
-        out += [u for u in self.allowed
-                if u != self.owner_id and self.store.get_setting(f"started:{u}")]
-        return out
-
     async def send_to_owner(self, text_html: str, link: str | None = None,
                             force: bool = False) -> None:
-        """Yangi vakansiya yoki hisobotni egasiga (va ruxsatli foydalanuvchilarga) yuborish."""
-        if not force and not self.notify_on():
+        """Texnik hisobotlar va admin xabarlari — faqat botning egasiga."""
+        if not self.owner_id:
+            return
+        if not force and not self.store.notify_on(self.owner_id):
             return
         buttons = [Button.url("🔗 Kanaldagi postni ochish", link)] if link else None
-        for uid in self.recipients():
-            await self._send(uid, text_html, buttons)
+        await self._send(self.owner_id, text_html, buttons)
 
-    async def _send(self, uid: int, text_html: str, buttons) -> None:
+    async def broadcast(self, text_html: str, link: str | None = None) -> int:
+        """Yangi vakansiyani barcha obunachilarga yuboradi. Yuborilganlar sonini qaytaradi."""
+        buttons = [Button.url("🔗 Kanaldagi postni ochish", link)] if link else None
+        yuborildi = 0
+        for uid in self.store.subscribers():
+            if await self._send(uid, text_html, buttons):
+                yuborildi += 1
+            await asyncio.sleep(BROADCAST_GAP)
+        log.info("Tarqatildi: %d obunachi", yuborildi)
+        return yuborildi
+
+    async def _send(self, uid: int, text_html: str, buttons) -> bool:
+        """Bitta foydalanuvchiga yuborish. Muvaffaqiyatli bo'lsa True.
+
+        Bitta foydalanuvchining xatosi butun tarqatishni to'xtatmaydi.
+        """
         for _ in range(3):
             try:
                 await self.client.send_message(uid, text_html, buttons=buttons,
                                                link_preview=False)
-                return
+                return True
             except FloodWaitError as e:
                 log.warning("Bot FloodWait %ss", e.seconds)
                 await asyncio.sleep(e.seconds + 1)
-            except ValueError:
-                log.warning("Bot %s ga yoza olmadi: @%s botini oching va /start bosing",
-                            uid, self.username)
-                return
+            except (UserIsBlockedError, InputUserDeactivatedError, ValueError):
+                log.info("Foydalanuvchi %s ga yozib bo'lmadi — ro'yxatdan chiqarildi", uid)
+                self.store.deactivate(uid)
+                return False
             except Exception as e:
                 log.error("Bot xabar yubora olmadi (%s): %s", uid, e)
-                return
+                return False
+        return False

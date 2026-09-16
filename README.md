@@ -25,7 +25,7 @@ t.me/s/<kanal> ochiq sahifalari          Sizning botingiz
 - Har soatda yangi postlarni tekshiradi.
 - `.env` ga yangi kanal qo'shsangiz, 15 daqiqada o'zi ilg'aydi va uning 15 kunini ko'rib chiqadi — qayta ishga tushirish shart emas.
 - Yangi vakansiya bo'lsa, bot xabar beradi. 🔔 tugmasi bilan o'chirib qo'ysa bo'ladi.
-- Bot faqat sizga javob beradi, begonalar "⛔ Bu shaxsiy bot" javobini oladi.
+- Bot hammaga ochiq: kim `/start` bossa vakansiyalarni ko'radi va xabar oladi. 🔔 sozlamasi har foydalanuvchiga alohida.
 - Topilgan hamma vakansiyalar `vakansiyalar.csv` fayliga ham yoziladi.
 
 > **Cheklov:** faqat **ochiq** kanallar o'qiladi. Kanal egasi ochiq ko'rinishni
@@ -46,6 +46,10 @@ Bular **faqat bot uchun** kerak (Telethon bot tokeni bilan ulanadi).
 
 - Token: @BotFather → `/mybots` → botingiz → **API Token**
 - Sizning user ID ingiz: @userinfobot ga yozing, u raqamni ko'rsatadi
+
+> Bot hammaga ochiq — kim `/start` bossa foydalana oladi. `OWNER_ID` esa
+> admin huquqlarini beradi: 🔄 qayta tekshirish, 📡 kanallar ro'yxati va
+> texnik hisobotlar faqat sizga ko'rinadi.
 
 > ❗ Agar bu bot hozir boshqa kodda ishlayotgan bo'lsa (n8n, boshqa server,
 > webhook), ikkalasi bir-biriga xalaqit beradi. Bunday holda @BotFather'da
@@ -134,8 +138,8 @@ To'xtatish: `launchctl bootout gui/$(id -u)/uz.zettacode.jobfilter`
 | 🌍 Remote | Masofaviy yoki gibrid ish |
 | 📋 Hammasi | Hamma saqlangan vakansiyalar |
 | 📊 Statistika | Bugun / 7 kun, yo'nalishlar, eng foydali kanallar |
-| 🔄 Hozir tekshirish | Soatni kutmasdan yangi postlarni tekshirish |
-| 📡 Kanallar | Kuzatilayotgan kanallar va har biridan saqlangan vakansiyalar soni |
+| 🔄 Hozir tekshirish | *(faqat admin)* Soatni kutmasdan yangi postlarni tekshirish |
+| 📡 Kanallar | *(faqat admin)* Kuzatilayotgan kanallar va saqlangan vakansiyalar soni |
 | 🔔 Bildirishnoma | Yangi vakansiya xabarlarini yoqish/o'chirish |
 | *istalgan so'z* | Qidiruv: `uzum`, `laravel remote`, `senior flutter` |
 
@@ -157,8 +161,7 @@ Flutter · Middle · Remote
 | `INCLUDE_EXTRA` / `EXCLUDE_EXTRA` | Qo'shimcha / taqiqlangan kalit so'zlar |
 | `EXCLUDE_LEVELS` | Masalan `Intern,Lead`. Postda faqat shu darajalar bo'lsa, u tashlab yuboriladi |
 | `BOT_TOKEN` | Botingiz tokeni |
-| `OWNER_ID` | Sizning Telegram user ID ingiz — bot faqat shunga javob beradi |
-| `ALLOWED_USERS` | Botdan yana kim foydalana oladi (user ID) |
+| `OWNER_ID` | Sizning Telegram user ID ingiz — admin huquqlari (🔄, 📡, hisobotlar) |
 | `AI_ENDPOINT` / `AI_API_KEY` / `AI_MODEL` | AI baholashni yoqadi (ixtiyoriy) |
 | `AI_MIN_SCORE`, `PROFILE` | AI uchun minimal ball va profilingiz tavsifi |
 

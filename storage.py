@@ -30,6 +30,10 @@ class Storage:
             CREATE TABLE IF NOT EXISTS channels (
                 chat_id INTEGER PRIMARY KEY, title TEXT, last_msg_id INTEGER,
                 first_scan INTEGER, last_scan INTEGER);
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT,
+                joined INTEGER, last_seen INTEGER,
+                notify INTEGER DEFAULT 1, active INTEGER DEFAULT 1);
             """
         )
         self.db.commit()
@@ -150,3 +154,50 @@ class Storage:
     def set_setting(self, key: str, value: str) -> None:
         self.db.execute("INSERT OR REPLACE INTO settings VALUES (?,?)", (key, value))
         self.db.commit()
+
+    # ---------- foydalanuvchilar ----------
+    def add_user(self, user_id: int, username: str | None = None,
+                 first_name: str | None = None) -> None:
+        """Ro'yxatga oladi. Mavjud bo'lsa: ismni yangilaydi, qayta faollashtiradi.
+
+        `joined` va `notify` ataylab saqlanadi — foydalanuvchi bildirishnomani
+        o'chirib qo'ygan bo'lsa, qayta /start bosgani uni yoqib yubormaydi.
+        """
+        now = int(time.time())
+        self.db.execute(
+            """INSERT INTO users (user_id, username, first_name, joined, last_seen,
+                                  notify, active)
+               VALUES (?,?,?,?,?,1,1)
+               ON CONFLICT(user_id) DO UPDATE SET
+                 username=excluded.username,
+                 first_name=excluded.first_name,
+                 last_seen=excluded.last_seen,
+                 active=1""",
+            (user_id, username, first_name, now, now))
+        self.db.commit()
+
+    def set_notify(self, user_id: int, on: bool) -> None:
+        self.db.execute("UPDATE users SET notify=? WHERE user_id=?", (int(on), user_id))
+        self.db.commit()
+
+    def notify_on(self, user_id: int) -> bool:
+        """Yozuv yo'q bo'lsa True — standart holat yoqilgan."""
+        row = self.db.execute("SELECT notify FROM users WHERE user_id=?",
+                              (user_id,)).fetchone()
+        return True if row is None else bool(row[0])
+
+    def subscribers(self) -> list[int]:
+        """Xabar yuboriladiganlar: bildirishnoma yoqilgan va botni bloklamaganlar."""
+        return [r[0] for r in self.db.execute(
+            "SELECT user_id FROM users WHERE active=1 AND notify=1 ORDER BY user_id")]
+
+    def deactivate(self, user_id: int) -> None:
+        """Botni bloklagan foydalanuvchi — boshqa urinmaymiz."""
+        self.db.execute("UPDATE users SET active=0 WHERE user_id=?", (user_id,))
+        self.db.commit()
+
+    def user_count(self) -> tuple[int, int]:
+        """(jami, obunachilar)"""
+        one = lambda sql: self.db.execute(sql).fetchone()[0]
+        return (one("SELECT COUNT(*) FROM users"),
+                one("SELECT COUNT(*) FROM users WHERE active=1 AND notify=1"))

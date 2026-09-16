@@ -19,6 +19,8 @@ class FakeEvent:
     def __init__(self, text="", sender=42, data=None):
         self.raw_text, self.sender_id, self.data = text, sender, data
         self.out = []
+    async def get_sender(self):
+        return NS(username=f"u{self.sender_id}", first_name=f"User {self.sender_id}")
     async def respond(self, text, buttons=None, **kw):
         th.parse(text); self.out.append(("respond", text, buttons))
     async def edit(self, text, buttons=None, **kw):
@@ -35,7 +37,6 @@ def make_app(monkeypatch):
     monkeypatch.setenv("BOT_SESSION_NAME", os.path.join(tmp, "b"))
     app = main.App()
     app.bot.owner_id = 42
-    app.bot.allowed = {42}
     sent = []
     async def fake_send(text, link=None, force=False):
         th.parse(text); sent.append((text, link, force))
@@ -91,11 +92,18 @@ def test_full_flow(monkeypatch):
         e5 = FakeEvent("📊 Statistika"); await bot.on_message(e5)
         assert "Bazada jami: <b>13</b>" in e5.out[0][1]
         e6 = FakeEvent("🔔 Bildirishnoma"); await bot.on_message(e6)
-        assert not bot.notify_on()
+        assert app.store.notify_on(42) is False
+        # bot ochiq: notanish foydalanuvchi ham menyu oladi, lekin admin tugmalarisiz
         e7 = FakeEvent("/start", sender=999); await bot.on_message(e7)
-        assert "shaxsiy" in e7.out[0][1]
+        begona_tugmalar = [b.button.text for row in e7.out[0][2] for b in row]
+        assert "shaxsiy" not in e7.out[0][1].lower()
+        assert "💙 Flutter" in begona_tugmalar
+        assert "🔄 Hozir tekshirish" not in begona_tugmalar
         e8 = FakeEvent("/start"); await bot.on_message(e8)
-        assert e8.out[0][2] and app.store.get_setting("started:42") == "1"
+        egasi_tugmalar = [b.button.text for row in e8.out[0][2] for b in row]
+        assert "🔄 Hozir tekshirish" in egasi_tugmalar
+        # ikkalasi ham users jadvaliga tushdi (42 ning 🔔 si e6 da o'chirilgan)
+        assert app.store.user_count() == (2, 1)
         e9 = FakeEvent(data=b"p|q:77|0"); await bot.on_callback(e9)
         assert e9.out[0][0] == "answer"
     run(ui())

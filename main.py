@@ -209,11 +209,18 @@ class App:
         return "\n".join(lines)
 
     async def send(self, text_html: str, link: str | None = None, force: bool = False):
+        """Texnik xabar — faqat botning egasiga (hisobot, yangi kanal)."""
         if not self.bot:
-            # Userbot yo'q — yuboradigan kanal ham yo'q. Vakansiya baribir bazaga tushadi.
             log.info("BOT_TOKEN yo'q, xabar yuborilmadi (natijalar bazada saqlangan).")
             return
         await self.bot.send_to_owner(text_html, link, force=force)
+
+    async def broadcast(self, text_html: str, link: str | None = None):
+        """Yangi vakansiya — barcha obunachilarga."""
+        if not self.bot:
+            log.info("BOT_TOKEN yo'q, tarqatilmadi (natijalar bazada saqlangan).")
+            return
+        await self.bot.broadcast(text_html, link)
 
     def write_csv(self, row: dict):
         new = not os.path.exists(self.csv_path)
@@ -396,7 +403,7 @@ class App:
     async def notify_new(self, items: list[dict]) -> None:
         if len(items) <= self.notify_max:
             for it in items:
-                await self.send(it["html"], it["link"])
+                await self.broadcast(it["html"], it["link"])
             return
         e = html.escape
         lines = [f"🆕 <b>{len(items)} ta yangi vakansiya</b>\n"]
@@ -405,7 +412,7 @@ class App:
         if len(items) > 15:
             lines.append(f"… va yana {len(items) - 15} ta")
         lines.append("\nBarchasi menyuda: 🆕 Bugungi / 📋 Hammasi 👇")
-        await self.send("\n".join(lines))
+        await self.broadcast("\n".join(lines))
 
     async def loop_every(self, minutes: int, fn) -> None:
         while True:
@@ -477,9 +484,8 @@ class App:
             if not self.owner_id:
                 sys.exit("❌ .env da OWNER_ID yo'q. Botdan kim foydalanishini bilish uchun "
                          "Telegram user ID ingizni yozing (@userinfobot ko'rsatadi).")
-            extra = [int(x) for x in env_list("ALLOWED_USERS") if x.lstrip("-").isdigit()]
-            await self.bot.start(owner_id=self.owner_id, extra_allowed=extra)
-            if not self.store.get_setting(f"started:{self.owner_id}"):
+            await self.bot.start(owner_id=self.owner_id)
+            if self.owner_id not in self.store.subscribers():
                 log.warning("👉 Telegramda @%s botini oching va /start bosing — "
                             "aks holda bot sizga yoza olmaydi.", self.bot.username)
         else:
