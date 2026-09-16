@@ -1,0 +1,39 @@
+# IT-vakansiya filtri — systemd namunasi (Linux server).
+#
+#   sudo cp deploy/jobfilter.service.example /etc/systemd/system/jobfilter.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now jobfilter
+#   journalctl -u jobfilter -f
+#
+# WorkingDirectory va User ni o'z serveringizga moslang.
+[Unit]
+Description=Job Filter Telegram Bot (job_search_tg)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=azureuser
+Group=azureuser
+WorkingDirectory=/home/azureuser/Projects/job_search_tg
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/home/azureuser/Projects/job_search_tg/.env
+ExecStart=/home/azureuser/Projects/job_search_tg/venv/bin/python main.py
+Restart=always
+RestartSec=30
+
+# Izolyatsiya: xizmat faqat o'z papkasiga yoza oladi
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectControlGroups=true
+ReadWritePaths=/home/azureuser/Projects/job_search_tg
+MemoryHigh=512M
+MemoryMax=1G
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=jobfilter
+
+[Install]
+WantedBy=multi-user.target

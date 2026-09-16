@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Mac yoqilganda skriptni avtomatik ishga tushirish (launchd).
-# Avval bir marta qo'lda `python main.py --list` bilan login qiling!
+# Login kerak emas — avval .env da CHANNELS va BOT_TOKEN ni to'ldiring.
 set -euo pipefail
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PY="$DIR/venv/bin/python"
@@ -8,7 +8,7 @@ LABEL="uz.zettacode.jobfilter"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 
 [ -x "$PY" ] || { echo "❌ $PY topilmadi. README dagi o'rnatish qadamini bajaring."; exit 1; }
-ls "$DIR"/*.session >/dev/null 2>&1 || { echo "❌ Session yo'q. Avval: $PY main.py --list"; exit 1; }
+[ -f "$DIR/.env" ] || { echo "❌ .env yo'q. cp .env.example .env qiling."; exit 1; }
 mkdir -p "$DIR/logs" "$HOME/Library/LaunchAgents"
 
 cat > "$PLIST" <<PL

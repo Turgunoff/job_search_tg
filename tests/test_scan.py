@@ -1,109 +1,132 @@
-"""Soatlik skan, 15 kunlik backfill va yangi kanal qo'shilishi (soxta Telegram client bilan)."""
+"""Soatlik skan, 15 kunlik backfill va kanal qo'shilishi (soxta tme_web manbai bilan)."""
 import asyncio, os, sys, tempfile
 from datetime import datetime, timezone, timedelta
-from types import SimpleNamespace as NS
+
+import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from telethon.extensions import html as th
 import main
+import tme_web
 from test_filters import FLUTTER_UZ, BACKEND_RU, IOS_EN, RESUME
 
 NOW = datetime.now(timezone.utc)
 
 
 def m(i, text, days_ago):
-    return NS(id=i, message=text, date=NOW - timedelta(days=days_ago))
+    return tme_web.WebPost(id=i, message=text, date=NOW - timedelta(days=days_ago))
 
 
-class FakeClient:
+class FakeTme:
+    """tme_web ning tarmoqsiz o'rnini bosuvchisi — shartnomasi bir xil."""
+
     def __init__(self):
-        self.posts = {}      # pid -> [msg, ...] (ID bo'yicha o'sib boradi)
-        self.dialogs = []    # [NS(id, name, is_channel, is_group, entity)]
-        self.calls = []
+        self.posts: dict[str, list] = {}
+        self.titles: dict[str, str] = {}
+        self.calls: list[tuple] = []
 
-    def add_channel(self, pid, title, username, posts):
-        ent = NS(id=abs(pid) - 1000000000000, title=title, username=username)
-        self.dialogs.append(NS(id=pid, name=title, is_channel=True, is_group=False, entity=ent))
-        self.posts[pid] = posts
+    def add_channel(self, username, title, posts):
+        self.titles[username] = title
+        self.posts[username] = list(posts)
 
-    async def get_dialogs(self):
-        return self.dialogs
+    async def probe(self, channel):
+        name = tme_web.normalize(channel)
+        if name not in self.posts:
+            return False, f"{name}: HTTP 404", 0
+        return True, self.titles[name], len(self.posts[name])
 
-    async def get_entity(self, pid):
-        return next(d.entity for d in self.dialogs if d.id == pid)
+    async def iter_posts(self, channel, *, min_id=None, since=None, max_pages=60):
+        name = tme_web.normalize(channel)
+        self.calls.append((name, min_id, since is not None))
+        posts = sorted(self.posts[name], key=lambda p: p.id)
+        if min_id is not None:
+            posts = [p for p in posts if p.id > min_id]
+        if since is not None:
+            posts = [p for p in posts if p.date >= since]
+        return self.titles[name], posts
 
-    async def iter_messages(self, pid, limit=None, min_id=0):
-        self.calls.append((pid, min_id))
-        for msg in sorted(self.posts[pid], key=lambda x: -x.id)[:limit]:
-            if msg.id > min_id:
-                yield msg
 
+@pytest.fixture
+def app(monkeypatch):
+    tmp = tempfile.mkdtemp()
+    monkeypatch.setenv("API_ID", "1")
+    monkeypatch.setenv("API_HASH", "x")
+    monkeypatch.setenv("BOT_TOKEN", "")
+    monkeypatch.setenv("AI_API_KEY", "")
+    monkeypatch.setenv("CHANNELS", "")
+    monkeypatch.setenv("EXCLUDE_CHANNELS", "")
+    monkeypatch.setenv("BACKFILL_DAYS", "15")
+    monkeypatch.setenv("DB_PATH", os.path.join(tmp, "t.db"))
+    monkeypatch.setenv("CSV_PATH", os.path.join(tmp, "t.csv"))
+    monkeypatch.setattr(main, "load_dotenv", lambda *a, **k: None)  # .env ni o'qimasin
 
-def make_app(tmp):
-    os.environ.update(API_ID="1", API_HASH="x", BOT_TOKEN="", CHANNELS="", FOLDER="",
-                      EXCLUDE_CHANNELS="", BACKFILL_DAYS="15",
-                      DB_PATH=os.path.join(tmp, "t.db"), CSV_PATH=os.path.join(tmp, "t.csv"),
-                      SESSION_NAME=os.path.join(tmp, "u"))
-    app = main.App()
-    app.client = FakeClient()
-    app.sent = []
+    fake = FakeTme()
+    monkeypatch.setattr(main.tme_web, "probe", fake.probe)
+    monkeypatch.setattr(main.tme_web, "iter_posts", fake.iter_posts)
+
+    a = main.App()
+    a.tme = fake
+    a.sent = []
 
     async def fake_send(text, link=None, force=False):
-        th.parse(text)
-        app.sent.append((text, link, force))
-    app.send = fake_send
-    app.lock = asyncio.Lock()
-    return app
+        th.parse(text)                       # HTML yaroqliligini tekshiradi
+        a.sent.append((text, link, force))
+
+    a.send = fake_send
+    a.lock = asyncio.Lock()
+    return a
 
 
-def run(c):
-    return asyncio.run(c)
+def pid_of(username):
+    return tme_web.chat_id_for(username)
 
 
-def test_backfill_hourly_and_new_channel():
-    tmp = tempfile.mkdtemp()
-    app = make_app(tmp)
-    c = app.client
-    c.add_channel(-1000000000111, "IT Vakansiyalar", "itvak", [
+def test_backfill_hourly_and_new_channel(app, monkeypatch):
+    itvak, kunuz = pid_of("itvak"), pid_of("kunuz")
+    app.tme.add_channel("itvak", "IT Vakansiyalar", [
         m(1, FLUTTER_UZ, 20),          # 15 kundan eski -> olinmaydi
         m(2, BACKEND_RU, 10),
         m(3, RESUME, 5),
         m(4, IOS_EN, 1),
     ])
-    c.add_channel(-1000000000222, "Kun.uz", "kunuz", [m(1, BACKEND_RU, 1)])  # job kanal emas
+    app.tme.add_channel("kunuz", "Kun.uz", [m(1, BACKEND_RU, 1)])
+    monkeypatch.setenv("CHANNELS", "@itvak")   # kunuz ro'yxatda yo'q
 
     async def go():
         app.peers = await app.compute_peers()
-        assert app.peers == [-1000000000111]
+        assert app.peers == [itvak]
+        assert kunuz not in app.peers
 
         # 1) birinchi ishga tushish: 15 kunlik skan, alohida xabar yo'q, faqat hisobot
         n = await app.scan_all()
         assert n == 2
         assert len(app.sent) == 1 and "Kanal reytingi" in app.sent[0][0]
         assert app.store.query("all")[1] == 2
-        assert app.store.channel_last_id(-1000000000111) == 4
+        assert app.store.channel_last_id(itvak) == 4
+        assert app.tme.calls[0][2] is True         # birinchi marta -> since bilan
 
         # 2) soatlik skan: yangi post yo'q -> hech narsa
         app.sent.clear()
         assert await app.scan_all() == 0
         assert app.sent == []
-        assert c.calls[-1] == (-1000000000111, 4)   # min_id bilan faqat yangilari so'raladi
+        assert app.tme.calls[-1] == ("itvak", 4, False)   # faqat min_id dan keyingilari
 
         # 3) yangi post + boshqa kanalning dublikati
-        c.posts[-1000000000111] += [m(5, FLUTTER_UZ + "\nYangi loyiha uchun", 0),
-                                    m(6, BACKEND_RU + "\n@boshqa", 0)]   # 6 = dublikat
+        app.tme.posts["itvak"] += [m(5, FLUTTER_UZ + "\nYangi loyiha uchun", 0),
+                                   m(6, BACKEND_RU + "\n@boshqa", 0)]   # 6 = dublikat
         assert await app.scan_all() == 1
         assert len(app.sent) == 1 and app.sent[0][1] == "https://t.me/itvak/5"
 
-        # 4) foydalanuvchi yangi kanalga qo'shildi -> darhol 15 kunlik skan
+        # 4) .env ga yangi kanal qo'shildi -> darhol 15 kunlik skan
         app.sent.clear()
-        c.add_channel(-1000000000333, "Remote Jobs UZ", "remotejobsuz", [
-            m(10, IOS_EN, 3),                                  # dublikat (1-kanalda bor)
+        app.tme.add_channel("remotejobsuz", "Remote Jobs UZ", [
+            m(10, IOS_EN, 3),                                  # dublikat (itvak da bor)
             m(11, "#vakansiya\nAndroid dasturchi (Kotlin) kerak\nMaosh: 2000$", 7),
             m(9, "#vakansiya\nFullstack developer kerak, maosh 1500$", 30),   # eski
         ])
+        monkeypatch.setenv("CHANNELS", "@itvak,@remotejobsuz")
         await app.refresh_channels()
-        assert -1000000000333 in app.peers
+        assert pid_of("remotejobsuz") in app.peers
         assert len(app.sent) == 1 and "Yangi kanal" in app.sent[0][0]
         assert "<b>1</b> ta mos vakansiya" in app.sent[0][0]
         assert app.store.query("cat:Android")[1] == 1
@@ -117,8 +140,9 @@ def test_backfill_hourly_and_new_channel():
         assert app.store.query("all")[1] == 4
 
         # 6) ko'p yangi vakansiya -> bitta umumiy xabar
-        c.posts[-1000000000111] += [
-            m(100 + i, f"#vakansiya\nLaravel backend dasturchi kerak — loyiha raqami {i}\nMaosh kelishiladi", 0)
+        app.tme.posts["itvak"] += [
+            m(100 + i, f"#vakansiya\nLaravel backend dasturchi kerak — loyiha raqami {i}\n"
+                       f"Maosh kelishiladi", 0)
             for i in range(8)]
         assert await app.scan_all() == 8
         assert len(app.sent) == 1 and "8 ta yangi vakansiya" in app.sent[0][0]
@@ -127,16 +151,51 @@ def test_backfill_hourly_and_new_channel():
         th.parse(app.bot_channels())
         assert "Remote Jobs UZ" in app.bot_channels()
 
-    run(go())
+    asyncio.run(go())
 
 
-def test_empty_new_channel_remembers_last_id():
-    tmp = tempfile.mkdtemp()
-    app = make_app(tmp)
-    app.client.add_channel(-1000000000444, "Old Jobs", "oldjobs", [m(50, BACKEND_RU, 40)])
+def test_empty_new_channel_remembers_last_id(app, monkeypatch):
+    """15 kunda post bo'lmagan kanal: oxirgi ID eslab qolinadi, qayta skanerlanmaydi."""
+    app.tme.add_channel("oldjobs", "Old Jobs", [m(50, BACKEND_RU, 40)])
+    monkeypatch.setenv("CHANNELS", "@oldjobs")
 
     async def go():
         app.peers = await app.compute_peers()
         assert await app.scan_all() == 0
-        assert app.store.channel_last_id(-1000000000444) == 50
-    run(go())
+        assert app.store.channel_last_id(pid_of("oldjobs")) == 50
+
+    asyncio.run(go())
+
+
+def test_yopiq_kanal_otkazib_yuboriladi(app, monkeypatch):
+    """Preview o'chirilgan kanal ro'yxatda bo'lsa ham, ishni to'xtatmaydi."""
+    app.tme.add_channel("ochiq", "Ochiq kanal", [m(1, FLUTTER_UZ, 1)])
+    monkeypatch.setenv("CHANNELS", "@ochiq,@yopiq_kanal")
+
+    async def go():
+        peers = await app.compute_peers()
+        assert peers == [pid_of("ochiq")]
+
+    asyncio.run(go())
+
+
+class TestWanted:
+    def test_turli_formatlar(self, monkeypatch):
+        monkeypatch.setenv("CHANNELS", "https://t.me/a, @b ,t.me/c,d")
+        monkeypatch.setenv("EXCLUDE_CHANNELS", "")
+        assert main.App.wanted() == ["a", "b", "c", "d"]
+
+    def test_exclude_ishlaydi(self, monkeypatch):
+        monkeypatch.setenv("CHANNELS", "@a,@b,@c")
+        monkeypatch.setenv("EXCLUDE_CHANNELS", "https://t.me/B")
+        assert main.App.wanted() == ["a", "c"]
+
+    def test_takror_tashlanadi(self, monkeypatch):
+        monkeypatch.setenv("CHANNELS", "@a,t.me/a,https://t.me/a/123")
+        monkeypatch.setenv("EXCLUDE_CHANNELS", "")
+        assert main.App.wanted() == ["a"]
+
+    def test_bosh_royxat(self, monkeypatch):
+        monkeypatch.setenv("CHANNELS", "")
+        monkeypatch.setenv("EXCLUDE_CHANNELS", "")
+        assert main.App.wanted() == []

@@ -1,14 +1,18 @@
-"""Telegram IT-vakansiya filtri (Telethon userbot + menyuli bot).
+"""Telegram IT-vakansiya filtri (loginsiz o'qish + menyuli bot).
+
+Kanallar t.me/s/<kanal> ochiq sahifasi orqali o'qiladi — akkauntga kirish,
+.session fayli va userbot kerak emas. Faqat ochiq (preview yoqilgan) kanallar.
+Natijalar sizning botingizga tushadi (bot tokeni uchun login talab qilinmaydi).
 
 Ishlash tartibi:
   • Yangi (hali ko'rilmagan) kanal  -> oxirgi BACKFILL_DAYS (15) kun skanerlanadi.
   • Har SCAN_INTERVAL_MIN (60) daqiqada -> har kanalda faqat oxirgi skandan keyingi postlar.
-  • Yangi kanalga qo'shilsangiz -> darhol (va har CHANNEL_CHECK_MIN daqiqada) aniqlanadi,
-    shu kanal uchun 15 kunlik skan qilinadi.
+  • .env dagi CHANNELS ro'yxatiga kanal qo'shsangiz -> CHANNEL_CHECK_MIN daqiqada
+    aniqlanadi va shu kanal uchun 15 kunlik skan qilinadi (qayta ishga tushirish shart emas).
   • Bir xil vakansiya faqat bir marta saqlanadi.
 
 Foydalanish:
-  python main.py --list      # kanallar ro'yxati (✅ = kuzatiladi)
+  python main.py --list      # sozlangan kanallarni tekshirish (ochiq/yopiq)
   python main.py             # doimiy ishlash
   python main.py --once      # bir marta skanerlash va chiqish
 """
@@ -22,13 +26,13 @@ import logging
 import os
 import sys
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
-from telethon import TelegramClient, events, functions, types, utils
-from telethon.errors import FloodWaitError
 
-from filters import JobFilter, fingerprint, guess_title, looks_like_job_channel
+import tme_web
+from filters import JobFilter, fingerprint, guess_title
 from storage import Storage
 
 load_dotenv()
@@ -52,11 +56,16 @@ def env_bool(name: str, default: bool) -> bool:
     return default if v is None or not v.strip() else v.strip().lower() in ("1", "true", "yes", "ha")
 
 
-def is_own(entity) -> bool:
-    """O'zingiz yaratgan yoki admin bo'lgan kanal (sizning kanallar portfeli)."""
-    if getattr(entity, "creator", False):
-        return True
-    return bool(getattr(entity, "broadcast", False) and getattr(entity, "admin_rights", None))
+@dataclass
+class Channel:
+    """Kuzatiladigan kanal.
+
+    Telethon entity o'rnini bosadi — `link()`, `format_post()` va `report()`
+    undan faqat `.id`, `.username`, `.title` ni oladi.
+    """
+    id: int          # tme_web.chat_id_for() bergan barqaror manfiy ID
+    username: str    # t.me dagi nomi, masalan "dartuz_jobs"
+    title: str       # ko'rinadigan nomi, masalan "Jobs Dart | Flutter"
 
 
 # --------------------------------------------------------------------------- #
@@ -67,9 +76,6 @@ class App:
         if not api_id or not api_hash:
             sys.exit("❌ .env faylida API_ID va API_HASH yo'q. README ni qarang.")
         self.api_id, self.api_hash = int(api_id), api_hash
-        self.client = TelegramClient(os.getenv("SESSION_NAME", "jobfilter"),
-                                     self.api_id, api_hash)
-        self.phone = os.getenv("PHONE") or None
         self.filter = JobFilter(
             include_extra=env_list("INCLUDE_EXTRA"),
             exclude_extra=env_list("EXCLUDE_EXTRA"),
@@ -80,11 +86,12 @@ class App:
         self.csv_path = os.getenv("CSV_PATH", "vakansiyalar.csv")
         self.min_score = int(os.getenv("AI_MIN_SCORE", "6"))
         self.ai = None
-        if os.getenv("ANTHROPIC_API_KEY"):
+        if os.getenv("AI_API_KEY"):
             from ai import AIScorer
             self.ai = AIScorer(
-                api_key=os.getenv("ANTHROPIC_API_KEY"),
-                model=os.getenv("AI_MODEL", "claude-haiku-4-5"),
+                endpoint=os.getenv("AI_ENDPOINT", ""),
+                api_key=os.getenv("AI_API_KEY"),
+                model=os.getenv("AI_MODEL", ""),
                 profile=os.getenv("PROFILE", "IT dasturchi"),
             )
         self.bot = None
@@ -95,122 +102,70 @@ class App:
         self.backfill_days = int(os.getenv("BACKFILL_DAYS", "15"))
         self.scan_interval = int(os.getenv("SCAN_INTERVAL_MIN", "60"))
         self.check_interval = int(os.getenv("CHANNEL_CHECK_MIN", "5"))
-        self.realtime = env_bool("REALTIME", False)
         self.notify_max = int(os.getenv("NOTIFY_MAX", "5"))
+        self.owner_id = int(os.getenv("OWNER_ID", "0") or 0)
         self.peers: list[int] = []
         self.lock: asyncio.Lock | None = None
-        self._pending_refresh: asyncio.Task | None = None
         self.last_scan: datetime | None = None
-        self.entities: dict[int, object] = {}
+        self.entities: dict[int, Channel] = {}
         self.stats: dict[int, Counter] = defaultdict(Counter)
 
     # ---------------- kanallarni aniqlash ---------------- #
-    def _mode(self) -> str:
-        ch = os.getenv("CHANNELS", "").strip().lower()
-        if ch in ("all", "hammasi"):
-            return "all"
-        if os.getenv("FOLDER", "").strip() or (ch and ch != "auto"):
-            return "manual"
-        return "auto"
-
     @staticmethod
-    def _auto_pick(d, mode: str) -> bool:
-        if not d.is_channel or is_own(d.entity):
-            return False
-        if mode == "all":
-            return True
-        return looks_like_job_channel(d.name, getattr(d.entity, "username", None))
-
-    async def list_all(self):
-        folders = await self._folders()
-        print("\n📂 PAPKALAR (FOLDER=... uchun):")
-        for title, peers in folders.items():
-            print(f"  • {title}  ({len(peers)} ta chat)")
-        mode = self._mode()
-        print(f"\n📢 KANAL VA GURUHLAR  (rejim: {mode};  ✅ = avtomatik tanlanadi, "
-              f"👤 = o'zingizniki, e'tiborga olinmaydi)")
-        n = 0
-        async for d in self.client.iter_dialogs():
-            if not d.is_channel:
-                continue
-            kind = "guruh" if d.is_group else "kanal"
-            uname = getattr(d.entity, "username", None)
-            if is_own(d.entity):
-                mark = "👤"
-            elif self._auto_pick(d, "all" if mode == "all" else "auto"):
-                mark = "✅"
-                n += 1
-            else:
-                mark = "  "
-            print(f"  {mark} {d.id:>16}  {kind:5} @{uname or '-':25} {d.name}")
-        if mode != "manual":
-            print(f"\nAvtomatik rejimda {n} ta kanal kuzatiladi. Keraksizini EXCLUDE_CHANNELS ga, "
-                  f"topilmaganini CHANNELS ga qo'shing (auto bilan birga: CHANNELS=auto,@kanal).")
-
-    async def _folders(self) -> dict[str, list[int]]:
-        res = await self.client(functions.messages.GetDialogFiltersRequest())
-        items = getattr(res, "filters", res)
-        out: dict[str, list[int]] = {}
-        for f in items:
-            title = getattr(f, "title", None)
-            if title is None:  # "Barcha chatlar" papkasi
-                continue
-            title = str(getattr(title, "text", title))
-            peers = list(getattr(f, "include_peers", []) or []) + \
-                list(getattr(f, "pinned_peers", []) or [])
-            out[title] = [utils.get_peer_id(p) for p in peers]
-        return out
-
-    async def _resolve_one(self, ch: str) -> int:
-        ent = await self.client.get_entity(int(ch) if ch.lstrip("-").isdigit() else ch)
-        return utils.get_peer_id(ent)
+    def wanted() -> list[str]:
+        """.env dagi CHANNELS dan kuzatiladigan kanal nomlari (EXCLUDE_CHANNELS chegirilgan)."""
+        skip = {tme_web.normalize(c).lower() for c in env_list("EXCLUDE_CHANNELS")}
+        names: list[str] = []
+        for raw in env_list("CHANNELS"):
+            name = tme_web.normalize(raw)
+            if name and name.lower() not in skip and name not in names:
+                names.append(name)
+        return names
 
     async def compute_peers(self, strict: bool = True) -> list[int]:
-        dialogs = await self.client.get_dialogs()  # entity keshini ham to'ldiradi
-        channels = env_list("CHANNELS")
-        mode = self._mode()
-        ids: list[int] = []
-        if mode == "all" or mode == "auto" or any(c.lower() == "auto" for c in channels):
-            pick_mode = "all" if mode == "all" else "auto"
-            ids += [d.id for d in dialogs if self._auto_pick(d, pick_mode)]
-        folder = os.getenv("FOLDER", "").strip()
-        if folder:
-            folders = await self._folders()
-            match = next((v for k, v in folders.items()
-                          if k.strip().lower() == folder.lower()), None)
-            if match is None:
-                msg = f"'{folder}' papkasi topilmadi. Mavjud: {', '.join(folders) or '-'}"
-                if strict:
-                    sys.exit("❌ " + msg)
-                log.warning(msg)
-                match = []
-            ids += match
-        for ch in channels:
-            if ch.lower() in ("auto", "all", "hammasi"):
-                continue
-            try:
-                ids.append(await self._resolve_one(ch))
-            except Exception as e:
-                log.warning("Kanal topilmadi: %s (%s)", ch, e)
-
-        excluded: set[int] = set()
-        for ch in env_list("EXCLUDE_CHANNELS"):
-            try:
-                excluded.add(await self._resolve_one(ch))
-            except Exception as e:
-                log.warning("EXCLUDE_CHANNELS: topilmadi %s (%s)", ch, e)
-        ids = [i for i in dict.fromkeys(ids) if i not in excluded]
-        if not ids and strict:
-            sys.exit("❌ Kuzatiladigan kanal topilmadi. `python main.py --list` ni ko'ring "
-                     "va .env da CHANNELS yoki FOLDER ni to'ldiring.")
-        ok = []
-        for pid in ids:
-            try:
-                self.entities[pid] = await self.client.get_entity(pid)
+        """Kanal ro'yxatini o'qiydi va har birining ochiqligini tekshiradi."""
+        names = self.wanted()
+        if not names and strict:
+            sys.exit("❌ .env da CHANNELS bo'sh. Kuzatiladigan kanallarni vergul bilan "
+                     "yozing, masalan: CHANNELS=@dartuz_jobs,@progjob")
+        ok: list[int] = []
+        for name in names:
+            pid = tme_web.chat_id_for(name)
+            if pid in self.entities:          # oldin tekshirilgan — qayta so'ramaymiz
                 ok.append(pid)
-            except Exception as e:
-                log.warning("Entity olinmadi %s: %s", pid, e)
+                continue
+            opened, title, _ = await tme_web.probe(name)
+            if not opened:
+                log.warning("Kanal o'qilmadi (yopiq yoki mavjud emas): @%s — %s", name, title)
+                continue
+            self.entities[pid] = Channel(id=pid, username=name, title=title)
+            ok.append(pid)
+        if not ok and strict:
+            sys.exit("❌ Birorta kanal o'qilmadi. `python main.py --list` bilan tekshiring.")
         return ok
+
+    async def list_all(self):
+        """Sozlangan kanallarni tekshirib, ochiq/yopiqligini ko'rsatadi."""
+        names = self.wanted()
+        if not names:
+            print("\n❌ .env da CHANNELS bo'sh.\n"
+                  "   Masalan: CHANNELS=@dartuz_jobs,@progjob,@uzdev_jobs")
+            return
+        print(f"\n📢 SOZLANGAN KANALLAR: {len(names)} ta  "
+              f"(✅ = o'qiladi, ❌ = loginsiz o'qib bo'lmaydi)\n")
+        ochiq = 0
+        for name in names:
+            opened, title, count = await tme_web.probe(name)
+            if opened:
+                ochiq += 1
+                print(f"  ✅ @{name:<28} {count:>2} post   {title}")
+            else:
+                print(f"  ❌ @{name:<28}          {title}")
+        print(f"\n{ochiq} / {len(names)} kanal o'qiladi.")
+        if ochiq < len(names):
+            print("❌ belgililarda kanal egasi ochiq ko'rinishni (preview) o'chirgan — "
+                  "ularni loginsiz o'qib bo'lmaydi. EXCLUDE_CHANNELS ga qo'shsangiz, "
+                  "har safar tekshirilmaydi.")
 
     def title(self, pid: int) -> str:
         return str(getattr(self.entities.get(pid), "title", pid))
@@ -254,17 +209,11 @@ class App:
         return "\n".join(lines)
 
     async def send(self, text_html: str, link: str | None = None, force: bool = False):
-        if self.bot:
-            await self.bot.send_to_owner(text_html, link, force=force)
+        if not self.bot:
+            # Userbot yo'q — yuboradigan kanal ham yo'q. Vakansiya baribir bazaga tushadi.
+            log.info("BOT_TOKEN yo'q, xabar yuborilmadi (natijalar bazada saqlangan).")
             return
-        while True:
-            try:
-                await self.client.send_message("me", text_html, parse_mode="html",
-                                               link_preview=False)
-                return
-            except FloodWaitError as e:
-                log.warning("FloodWait %ss", e.seconds)
-                await asyncio.sleep(e.seconds + 1)
+        await self.bot.send_to_owner(text_html, link, force=force)
 
     def write_csv(self, row: dict):
         new = not os.path.exists(self.csv_path)
@@ -277,7 +226,7 @@ class App:
     # ---------------- asosiy ishlov ---------------- #
     async def handle(self, msg, chat_id: int) -> dict | None:
         """Postni tekshiradi. Yangi mos vakansiya saqlansa — uning ma'lumotini qaytaradi."""
-        chat = self.entities.get(chat_id) or await msg.get_chat()
+        chat = self.entities[chat_id]
         st = self.stats[chat_id]
         st["jami"] += 1
         text = getattr(msg, "message", None) or ""
@@ -349,40 +298,44 @@ class App:
 
     async def scan_channel(self, pid: int) -> tuple[list[dict], bool]:
         """(yangi vakansiyalar, bu birinchi — 15 kunlik skanmi)"""
+        chat = self.entities[pid]
         last_id = self.store.channel_last_id(pid)
         first = last_id is None
-        msgs = []
         if first:
             since = datetime.now(timezone.utc) - timedelta(days=self.backfill_days)
-            async for msg in self.client.iter_messages(pid, limit=5000):
-                if msg.date < since:
-                    break
-                msgs.append(msg)
+            title, msgs = await tme_web.iter_posts(chat.username, since=since)
         else:
-            async for msg in self.client.iter_messages(pid, min_id=last_id, limit=3000):
-                msgs.append(msg)
+            title, msgs = await tme_web.iter_posts(chat.username, min_id=last_id)
+        if title and title != chat.title:      # kanal nomini yangilab turamiz
+            chat.title = title
         new: list[dict] = []
         max_id = last_id or 0
-        for msg in reversed(msgs):  # eskisidan yangisiga
+        for msg in msgs:  # tme_web eskisidan yangisiga qaytaradi
             max_id = max(max_id, msg.id)
             item = await self.handle(msg, pid)
             if item:
                 new.append(item)
         if first and not msgs:  # 15 kunda post bo'lmagan kanal: oxirgi ID ni eslab qolamiz
-            async for msg in self.client.iter_messages(pid, limit=1):
-                max_id = msg.id
+            _, oxirgi = await tme_web.iter_posts(chat.username)
+            if oxirgi:
+                max_id = oxirgi[-1].id
         self.store.set_channel(pid, self.title(pid), max_id)
         log.info("%s %s — %d post, %d yangi vakansiya",
                  "🆕 15 kunlik skan:" if first else "Skan:", self.title(pid), len(msgs), len(new))
         return new, first
 
     async def _scan_safe(self, pid: int) -> tuple[list[dict], bool]:
-        for _ in range(2):
+        for urinish in range(2):
             try:
                 return await self.scan_channel(pid)
-            except FloodWaitError as e:
-                log.warning("FloodWait %ss (%s)", e.seconds, self.title(pid))
-                await asyncio.sleep(e.seconds + 1)
+            except tme_web.ChannelUnavailable as e:
+                # Vaqtincha tarmoq muammosi bo'lishi mumkin — bir marta qayta urinamiz.
+                if urinish == 0:
+                    log.warning("Kanal javob bermadi (%s), qayta urinaman", e)
+                    await asyncio.sleep(10)
+                    continue
+                log.warning("Kanal o'qilmadi: %s", e)
+                return [], False
             except Exception as e:
                 log.warning("Kanalni o'qib bo'lmadi %s: %s", self.title(pid), e)
                 return [], False
@@ -410,9 +363,10 @@ class App:
             return total
 
     async def refresh_channels(self) -> None:
-        """Obunalarni qayta ko'rib chiqadi; yangi kanal bo'lsa — darhol 15 kunlik skan."""
+        """.env dagi CHANNELS ni qayta o'qiydi; yangi kanal bo'lsa — darhol 15 kunlik skan."""
         async with self.lock:
             try:
+                load_dotenv(override=True)   # fayl qo'lda tahrirlangan bo'lishi mumkin
                 peers = await self.compute_peers(strict=False)
             except Exception as e:
                 log.warning("Kanallar ro'yxatini yangilab bo'lmadi: %s", e)
@@ -438,17 +392,6 @@ class App:
                         f"Menyudan ko'ring 👇", force=True)
                 elif new:
                     await self.notify_new(new)
-
-    def refresh_soon(self, delay: int = 10) -> None:
-        """Kanalga qo'shilish/chiqish hodisasida bir necha soniyadan keyin tekshirish."""
-        if self._pending_refresh and not self._pending_refresh.done():
-            return
-
-        async def later():
-            await asyncio.sleep(delay)
-            await self.refresh_channels()
-
-        self._pending_refresh = asyncio.ensure_future(later())
 
     async def notify_new(self, items: list[dict]) -> None:
         if len(items) <= self.notify_max:
@@ -515,8 +458,8 @@ class App:
         if cats:
             lines.append("\n<b>Yo'nalishlar bo'yicha:</b> " +
                          ", ".join(f"{k}: {v}" for k, v in cats.most_common()))
-        lines.append("\n🔴 — sizga mos post bermagan kanallar. Ularni EXCLUDE_CHANNELS ga "
-                     "qo'shish yoki obunadan chiqish mumkin.")
+        lines.append("\n🔴 — sizga mos post bermagan kanallar. Ularni .env dagi CHANNELS "
+                     "ro'yxatidan olib tashlash mumkin.")
         text = "\n".join(lines)
         plain = text
         for tag in ("<b>", "</b>", "<i>", "</i>"):
@@ -526,24 +469,21 @@ class App:
 
     # ---------------- ishga tushirish ---------------- #
     async def run(self, args):
-        # PHONE bo'sh bo'lsa — Telethon terminalda so'rasin (None uzatilsa xato beradi).
-        await self.client.start(
-            phone=self.phone or (lambda: input("Telefon raqamingiz (+998...): ")))
-        me = await self.client.get_me()
-        log.info("Kirildi: %s (id=%s)", me.first_name, me.id)
-
         if args.list:
             await self.list_all()
             return
 
         if self.bot:
+            if not self.owner_id:
+                sys.exit("❌ .env da OWNER_ID yo'q. Botdan kim foydalanishini bilish uchun "
+                         "Telegram user ID ingizni yozing (@userinfobot ko'rsatadi).")
             extra = [int(x) for x in env_list("ALLOWED_USERS") if x.lstrip("-").isdigit()]
-            await self.bot.start(owner_id=me.id, extra_allowed=extra)
-            if not self.store.get_setting(f"started:{me.id}"):
+            await self.bot.start(owner_id=self.owner_id, extra_allowed=extra)
+            if not self.store.get_setting(f"started:{self.owner_id}"):
                 log.warning("👉 Telegramda @%s botini oching va /start bosing — "
                             "aks holda bot sizga yoza olmaydi.", self.bot.username)
         else:
-            log.info("BOT_TOKEN yo'q — natijalar Saved Messages ga yuboriladi.")
+            log.info("BOT_TOKEN yo'q — natijalar faqat bazaga va CSV ga yoziladi.")
         if self.ai:
             log.info("AI baholash yoqilgan (model=%s, min=%s)", self.ai.model, self.min_score)
 
@@ -560,39 +500,26 @@ class App:
         if args.once:
             return
 
-        # Kanalga qo'shilish / chiqish hodisasi -> darhol tekshirish
-        @self.client.on(events.Raw(types.UpdateChannel))
-        async def _on_channel_update(update):
-            self.refresh_soon()
-
-        if self.realtime:
-            @self.client.on(events.NewMessage())
-            async def _on_new(event):
-                if event.chat_id not in self.peers:
-                    return
-                try:
-                    item = await self.handle(event.message, event.chat_id)
-                    if item:
-                        await self.notify_new([item])
-                except Exception:
-                    log.exception("Postni qayta ishlashda xato")
-
         asyncio.ensure_future(self.loop_every(self.scan_interval, self.scan_all))
         asyncio.ensure_future(self.loop_every(self.check_interval, self.refresh_channels))
-        log.info("👀 Ishlayapti: har %d daqiqada yangi postlar, har %d daqiqada yangi kanallar "
-                 "tekshiriladi%s. To'xtatish: Ctrl+C", self.scan_interval, self.check_interval,
-                 " (+ real vaqt)" if self.realtime else "")
-        await self.client.run_until_disconnected()
+        log.info("👀 Ishlayapti: har %d daqiqada yangi postlar, har %d daqiqada .env dagi "
+                 "kanallar ro'yxati tekshiriladi. To'xtatish: Ctrl+C",
+                 self.scan_interval, self.check_interval)
+        if self.bot:
+            await self.bot.client.run_until_disconnected()
+        else:
+            while True:                      # bot yo'q — shunchaki rejadagi vazifalarni kutamiz
+                await asyncio.sleep(3600)
 
     async def close(self):
-        await self.client.disconnect()
         if self.bot:
             await self.bot.client.disconnect()
 
 
 def main():
-    p = argparse.ArgumentParser(description="Telegram IT-vakansiya filtri")
-    p.add_argument("--list", action="store_true", help="kanallar va papkalarni ko'rsatish")
+    p = argparse.ArgumentParser(description="Telegram IT-vakansiya filtri (loginsiz)")
+    p.add_argument("--list", action="store_true",
+                   help="sozlangan kanallarni tekshirish (ochiq/yopiq)")
     p.add_argument("--days", type=int, default=0, metavar="KUN",
                    help="yangi kanallar uchun necha kun orqaga qarash (standart: BACKFILL_DAYS=15)")
     p.add_argument("--once", action="store_true", help="bir marta skanerlab chiqish")
@@ -600,13 +527,10 @@ def main():
     app = App()
     if args.days:
         app.backfill_days = args.days
-    loop = app.client.loop
     try:
-        loop.run_until_complete(app.run(args))
+        asyncio.run(app.run(args))
     except KeyboardInterrupt:
         print("\nTo'xtatildi.")
-    finally:
-        loop.run_until_complete(app.close())
 
 
 if __name__ == "__main__":

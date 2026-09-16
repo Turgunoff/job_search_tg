@@ -104,12 +104,8 @@ def test_full_flow():
     assert "mos / jami" in rep
 
 
-def test_auto_pick():
-    D = lambda name, uname=None, ch=True, **kw: NS(
-        is_channel=ch, name=name, entity=NS(username=uname, **kw))
-    pick = main.App._auto_pick
-    assert pick(D("IT Vakansiyalar", "itvakansiya"), "auto")
-    assert not pick(D("Kun.uz", "kunuz"), "auto")
-    assert pick(D("Kun.uz", "kunuz"), "all")
-    assert not pick(D("Ishbor Toshkent", "ishbor_tashkentda", creator=True), "auto")  # o'ziniki
-    assert not pick(D("Jobs chat", ch=False), "auto")
+def test_kanal_royxati(monkeypatch):
+    """Avtomatik topish o'rniga .env dagi ro'yxat — turli formatlar qabul qilinadi."""
+    monkeypatch.setenv("CHANNELS", "https://t.me/itvakansiya,@uzdev_jobs, t.me/kunuz ")
+    monkeypatch.setenv("EXCLUDE_CHANNELS", "@kunuz")
+    assert main.App.wanted() == ["itvakansiya", "uzdev_jobs"]
