@@ -11,11 +11,19 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-[ -f .env ] && set -a && . ./.env && set +a
 
-DB="${DB_PATH:-jobs.db}"
-DIR="${BACKUP_DIR:-backups}"
-KEEP="${BACKUP_KEEP:-14}"
+# .env ni `source` QILMAYMIZ: undagi PROFILE kabi qatorlarda bo'shliq, vergul va
+# qavslar bor — shell ularni buyruq deb o'qib, skriptni to'xtatib qo'yardi.
+# Shuning uchun faqat kerakli kalitni matn sifatida sug'urib olamiz.
+env_get() {
+    [ -f .env ] || return 0
+    sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" .env | tail -1 \
+        | sed -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/"
+}
+
+DB="${DB_PATH:-$(env_get DB_PATH)}";        DB="${DB:-jobs.db}"
+DIR="${BACKUP_DIR:-$(env_get BACKUP_DIR)}"; DIR="${DIR:-backups}"
+KEEP="${BACKUP_KEEP:-$(env_get BACKUP_KEEP)}"; KEEP="${KEEP:-14}"
 
 if [ ! -f "$DB" ]; then
     echo "❌ Baza topilmadi: $DB" >&2
