@@ -3,12 +3,7 @@ from datetime import datetime, timezone, timedelta
 from types import SimpleNamespace as NS
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-os.environ.update(API_ID="1", API_HASH="x", BOT_TOKEN="123:abc")
 tmp = tempfile.mkdtemp()
-os.environ["DB_PATH"] = os.path.join(tmp, "t.db")
-os.environ["CSV_PATH"] = os.path.join(tmp, "t.csv")
-os.environ["SESSION_NAME"] = os.path.join(tmp, "u")
-os.environ["BOT_SESSION_NAME"] = os.path.join(tmp, "b")
 
 from telethon.extensions import html as th
 import main
@@ -32,7 +27,12 @@ class FakeEvent:
         self.out.append(("answer", a, kw))
 
 
-def make_app():
+def make_app(monkeypatch):
+    # conftest xavfsiz qiymatlar beradi; bu testga soxta bot kerak.
+    monkeypatch.setenv("BOT_TOKEN", "123:abc")
+    monkeypatch.setenv("DB_PATH", os.path.join(tmp, "t.db"))
+    monkeypatch.setenv("CSV_PATH", os.path.join(tmp, "t.csv"))
+    monkeypatch.setenv("BOT_SESSION_NAME", os.path.join(tmp, "b"))
     app = main.App()
     app.bot.owner_id = 42
     app.bot.allowed = {42}
@@ -50,8 +50,8 @@ def msg(i, t, hours_ago=0):
     return NS(id=i, message=t, date=datetime.now(timezone.utc) - timedelta(hours=hours_ago))
 
 
-def test_full_flow():
-    app, sent = make_app()
+def test_full_flow(monkeypatch):
+    app, sent = make_app(monkeypatch)
     async def go():
         assert await app.handle(msg(1, FLUTTER_UZ, 30), -100111)
         assert await app.handle(msg(2, RESUME, 30), -100111) is None
